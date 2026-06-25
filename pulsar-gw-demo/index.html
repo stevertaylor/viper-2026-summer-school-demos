@@ -235,7 +235,7 @@
       <label class="ctl">GW frequency (Earth term, today)</label>
       <div class="row"><input id="freq" type="range" min="1" max="50" step="0.5" value="10">
         <span class="val" id="freqV"></span></div>
-      <label class="ctl">Reference strain h₀ (at M𝒸=10⁹, f=10 nHz)</label>
+      <label class="ctl">Reference strain h₀ (at M<sub>c</sub>=10⁹, f=10 nHz)</label>
       <div class="row"><input id="amp" type="range" min="0.1" max="5" step="0.1" value="1.5">
         <span class="val" id="ampV"></span></div>
       <label class="ctl">Inclination ι</label>
@@ -243,7 +243,7 @@
         <span class="val" id="inclV"></span></div>
       <button id="moreCtl" class="disclosure">Details <span class="chev">⌄</span></button>
       <div class="adv" id="advCtl">
-        <label class="ctl">Chirp mass M𝒸 (sets strain ∝ M𝒸<sup>5/3</sup> &amp; inspiral rate)</label>
+        <label class="ctl">Chirp mass M<sub>c</sub> (sets strain ∝ M<sub>c</sub><sup>5/3</sup> &amp; inspiral rate)</label>
         <div class="row"><input id="mchirp" type="range" min="0.05" max="5" step="0.05" value="1">
           <span class="val" id="mchirpV"></span></div>
         <label class="ctl">Polarization angle ψ</label>
@@ -1172,7 +1172,7 @@ function recompute(){
   $('phys').innerHTML =
     `Antenna F⁺ = <b>${r.Fp.toFixed(3)}</b>&nbsp; Fˣ = <b>${r.Fx.toFixed(3)}</b><br>`+
     `Strain h₀ (at f₀): <b>${(r.strain*1e15).toFixed(2)}×10⁻¹⁵</b> `+
-    `(∝ Mꟲ<sup>5/3</sup>f<sup>2/3</sup>)<br>`+
+    `(∝ M<sub>c</sub><sup>5/3</sup>f<sup>2/3</sup>)<br>`+
     `Earth-term f: <b>${(r.f0*1e9).toFixed(2)} nHz</b><br>`+
     `Pulsar-term f: <b>${(r.fP0*1e9).toFixed(2)} nHz</b> (<b>${drop.toFixed(0)}%</b> lower)<br>`+
     `Pulsar-term lag: <b>${r.tauYr.toFixed(0)} yr</b><br>`+
