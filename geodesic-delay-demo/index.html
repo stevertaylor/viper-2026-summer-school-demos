@@ -1155,11 +1155,18 @@ function updatePhys(){
   const m=mu(), {Fp,Fc}=responses(), tau=lagYr(m);
   const phaseOff=((omegaYr()*tau)%(2*Math.PI))*180/Math.PI;
   const rpkNs=residualPeak()*RES_TO_NS;
+  const g=Math.acos(THREE.MathUtils.clamp(-m,-1,1))*180/Math.PI;   // source–pulsar angle, deg
   $('phys').innerHTML=
     `F<sup>+</sup> = <b style="color:var(--accent)">${Fp.toFixed(3)}</b> &nbsp; `+
     `F<sup>×</sup> = <b style="color:var(--accent)">${Fc.toFixed(3)}</b><br>`+
     `Earth–pulsar phase offset&nbsp; <b>${phaseOff.toFixed(0)}°</b><br>`+
-    `peak residual&nbsp; <b style="color:var(--integ)">≈ ${rpkNs.toFixed(rpkNs<10?2:1)} ns</b>`;
+    `peak residual&nbsp; <b style="color:var(--integ)">≈ ${rpkNs.toFixed(rpkNs<10?2:1)} ns</b>`+
+    // γ→0/180°: line of sight ∥ propagation axis → p̂ⁱp̂ʲe_ij = 0, so the response (and z) vanish.
+    // This is the single-source null, NOT the pulsar–pulsar HD separation ζ (where Γ stays finite).
+    ((g<1.5||g>178.5) ?
+      `<br><span style="color:var(--wave)">Line of sight ∥ propagation axis: a transverse wave has `+
+      `no longitudinal response, so F<sup>+</sup>=F<sup>×</sup>=0 and z≡0. (Single-source null at `+
+      `γ=${g<90?0:180}° — distinct from the two-pulsar separation ζ in the HD curve.)</span>` : '');
 }
 // estimate peak |R| over one period for the readout
 function residualPeak(){

@@ -1229,10 +1229,15 @@ function drawPlot(){
   // grid + axes
   pctx.strokeStyle='#1e2a42'; pctx.lineWidth=1; pctx.fillStyle='#8497b5';
   pctx.font='10px -apple-system,Arial'; pctx.textAlign='right'; pctx.textBaseline='middle';
+  // adaptive label precision: residual amplitude spans sub-ns (low Mc / face-on) to many ns,
+  // so a fixed toFixed(0) collapses ticks to "0/-0/1/-1". Pick decimals from the tick step.
+  const step=(mx-mn)/4;
+  const dec=Math.max(0, Math.min(4, 1-Math.floor(Math.log10(step||1))));
+  const fmtY=v=>{ let s=v.toFixed(dec); return /^-0\.?0*$/.test(s) ? s.slice(1) : s; };
   for(let g=0;g<=4;g++){
     const v=mn+(mx-mn)*g/4, y=Y(v);
     pctx.beginPath(); pctx.moveTo(m.l,y); pctx.lineTo(m.l+W,y); pctx.stroke();
-    pctx.fillText(v.toFixed(0), m.l-6, y);
+    pctx.fillText(fmtY(v), m.l-6, y);
   }
   pctx.textAlign='center'; pctx.textBaseline='top';
   for(let g=0;g<=5;g++){

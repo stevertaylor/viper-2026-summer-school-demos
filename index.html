@@ -212,6 +212,7 @@ function openDemo(d){
   stage.classList.add('show'); home.classList.remove('show');
   $('barCtx').textContent='/ '+d.title;
   $('newTab').style.display='flex';
+  $('labLink').style.display='none';   // demo carries its own VIPER logo in the iframe — avoid doubling
   pills.querySelectorAll('.pill').forEach(p=>p.classList.toggle('active',p.dataset.id===d.id));
   document.title=d.title+' — Summer School Demos';
 }
@@ -223,6 +224,7 @@ function showHome(){
   floader.classList.remove('hide');
   $('barCtx').textContent='';
   $('newTab').style.display='none';
+  $('labLink').style.display='';       // restore the bar logo on the home grid
   pills.querySelectorAll('.pill').forEach(p=>p.classList.remove('active'));
   document.title='Summer School Demos — VIPER';
 }
