@@ -13,6 +13,7 @@ summer school. Everything is static HTML — no install, no server, no build ste
 | **Pulsar Timing & Gravitational Waves** | A passing GW from a supermassive black-hole binary nudges a pulsar's pulse arrival times — drag the pulsar and source in 3D and watch the timing residual respond. |
 | **Cross-Correlating Pulsars** | Cross-correlate pulsar pairs across a sky of GW sources until they collapse onto the Hellings & Downs curve — the fingerprint of a GW background. |
 | **Pulse Delays Along the Geodesic** | Integrate the metric perturbation along a photon's geodesic and watch the whole path collapse to the Earth term and the pulsar term. |
+| **Binary Black-Hole Light Curves** | A supermassive black-hole binary feeding through two minidisks inside a circumbinary disk flickers like a clock — disentangle relativistic Doppler boosting, self-lensing flares, and accretion modulation. |
 
 ## Structure
 
@@ -21,6 +22,7 @@ index.html                  ← the hub (landing page + iframe launcher)
 pulsar-gw-demo/index.html
 hellings-downs-demo/index.html
 geodesic-delay-demo/index.html
+binary-minidisk-photometry/index.html
 ```
 
 The hub hosts exactly one demo in an `<iframe>` at a time and tears it down on
