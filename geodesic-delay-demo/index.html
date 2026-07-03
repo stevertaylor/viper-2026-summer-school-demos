@@ -243,7 +243,7 @@
       <label class="ctl">Strain amplitude&nbsp; h<sub>0</sub>&nbsp;<span class="pill">×10⁻¹⁵</span></label>
       <div class="row"><input id="amp" type="range" min="0.2" max="6" step="0.1" value="2">
         <span class="val" id="ampV"></span></div>
-      <label class="ctl">Polarisation</label>
+      <label class="ctl">Polarization</label>
       <div class="seg" id="polSeg" style="margin-bottom:4px">
         <span class="seg-ind" id="polInd"></span>
         <button id="polP">＋</button>
@@ -252,7 +252,7 @@
       </div>
       <button id="moreGW" class="disclosure">Details <span class="chev">⌄</span></button>
       <div class="adv" id="advGW">
-        <label class="ctl">Polarisation angle&nbsp; ψ</label>
+        <label class="ctl">Polarization angle&nbsp; ψ</label>
         <div class="row"><input id="psi" type="range" min="0" max="180" step="1" value="0">
           <span class="val" id="psiV"></span></div>
         <div class="readout">The <b style="color:var(--wave)">green node</b> is the GW
@@ -291,7 +291,7 @@
         <button id="playBtn" class="active">⏸ Run</button>
       </div>
       <div class="readout">A pulsar emits pulses like a metronome — the
-        <b style="color:#eaf4ff">bright train</b> is the signal travelling to Earth. The wave
+        <b style="color:#eaf4ff">bright train</b> is the signal traveling to Earth. The wave
         warps the spacing: where it squeezes the path the pulses <b>bunch up</b> (arrive
         sooner), where it stretches the path they <b>spread out</b> (arrive later). The
         <b style="color:#9db8d8">faint train</b> behind it is the perfectly regular cadence with
@@ -349,7 +349,8 @@
   <div class="scaleplac" id="placL"></div>
   <div class="hint">🖱 Drag empty space to <b>orbit</b> · scroll to <b>zoom</b> · drag the
     <b style="color:var(--earth)">pulsar</b> or the <b style="color:var(--wave)">GW source</b> to
-    re-aim · watch the pulse train ride the wave from pulsar to Earth.</div>
+    re-aim · watch the pulse train ride the wave from pulsar to Earth ·
+    <b>Space</b> = run/pause · <b>h</b> = hide panels.</div>
 
   <div id="welcome">
     <div class="card">
@@ -378,8 +379,8 @@
 
 <script type="importmap">
 { "imports": {
-  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  "three": "../vendor/three-0.160.0/three.module.js",
+  "three/addons/": "../vendor/three-0.160.0/jsm/"
 }}
 </script>
 <script type="module">
@@ -1043,7 +1044,7 @@ $('moreGW').onclick=function(){ this.classList.toggle('open'); $('advGW').classL
 
 // ---- guided derivation (segmented) ----
 const scenInfo={
-  psGeom:{ text:`<b>Setup.</b> Earth sits at the centre; the <b style="color:var(--earth)">pulsar</b>
+  psGeom:{ text:`<b>Setup.</b> Earth sits at the center; the <b style="color:var(--earth)">pulsar</b>
       lies a distance <b>L</b> away along p̂. The wave travels along Ω̂, away from the
       <b style="color:var(--wave)">GW source</b> at −Ω̂. Only the source–pulsar angle <b>γ</b>
       (cos γ = −Ω̂·p̂) will matter. Drag either node.`,

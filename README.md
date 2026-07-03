@@ -25,6 +25,8 @@ hellings-downs-demo/index.html
 geodesic-delay-demo/index.html
 binary-minidisk-photometry/index.html
 gw-binary-primer/index.html
+scripts/vendor-three.sh     ← one-shot: bundle Three.js locally (already run — see vendor/)
+vendor/three-0.160.0/       ← vendored Three.js + addons; the demos' importmaps point here
 ```
 
 The hub hosts exactly one demo in an `<iframe>` at a time and tears it down on
@@ -49,9 +51,31 @@ stay flat.
 
 3. Commit and push. It's live in ~30 s.
 
-Keep each demo a single self-contained `index.html` and use **HTTPS** for any
-CDN resources (the site is served over HTTPS; `http://` resources are blocked
-as mixed content).
+Keep each demo a single `index.html`. The only external dependency is Three.js,
+loaded through each demo's `<script type="importmap">` — either from the pinned
+CDN (`https://unpkg.com/three@0.160.0/…`) or, after running the vendor script
+below, from the local `../vendor/` copy. If you must add another CDN resource,
+use **HTTPS** (the site is served over HTTPS; `http://` is blocked as mixed
+content) — or better, vendor it.
+
+## Offline / USB use (no internet)
+
+Three.js (pinned 0.160.0) and every addon the demos use are **vendored in
+`vendor/`**, and each demo's importmap points there — nothing is fetched from a
+CDN, so the site runs with zero internet access (USB stick, flaky lecture-hall
+WiFi) and the live site is immune to CDN hiccups.
+
+To serve offline, copy the repo anywhere and run a one-line server from its
+root (ES modules don't load over `file://`, so double-clicking `index.html`
+won't work):
+
+```bash
+python3 -m http.server 8000     # then open http://localhost:8000/
+```
+
+`scripts/vendor-three.sh` is the script that set this up (download → verify the
+import closure → rewrite the importmaps). It's idempotent; re-run it only if
+you bump the Three.js version pin.
 
 ## Local preview
 

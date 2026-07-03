@@ -211,7 +211,7 @@
         <button id="psView">Viewing angle</button>
         <button id="psChirp">Inspiral</button>
       </div>
-      <div class="readout" id="scenNote">A spinning binary radiates a two-armed spiral of
+      <div class="readout" id="scenNote">An orbiting binary radiates a two-armed spiral of
         gravitational waves. The crests stream outward at <b>c</b>; their spacing is one wavelength,
         &lambda; = c / f<sub>GW</sub>.</div>
     </div>
@@ -300,7 +300,7 @@
   <div id="welcome">
     <div class="card">
       <h3>What <i>is</i> a gravitational wave?</h3>
-      <p>It is a ripple in spacetime itself — radiated by a binary as it orbits — travelling
+      <p>It is a ripple in spacetime itself — radiated by a binary as it orbits — traveling
         outward at the speed of light, stretching and squeezing everything it passes through.
         This primer builds the picture from a single orbiting pair.</p>
       <ol>
@@ -319,8 +319,8 @@
 
 <script type="importmap">
 { "imports": {
-  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  "three": "../vendor/three-0.160.0/three.module.js",
+  "three/addons/": "../vendor/three-0.160.0/jsm/"
 }}
 </script>
 
@@ -373,26 +373,24 @@ function strainAmp(Mc_Msun, fgw_Hz, D_m){
 // GW power radiated per solid angle, normalised to 1 at ι=0 (face-on)
 function fluxPattern(ci){ const x=ci*ci; return (1 + 6*x + x*x)/8; }
 
-// orthonormal pair (e1,e2) ⊥ khat — the transverse (polarization) plane
+// orthonormal pair (e1,e2) ⊥ khat — the transverse (polarization) plane.
+// e1 = sky-projection of the orbital axis ŷ, computed analytically so it is CONTINUOUS in ι
+// (a reference-vector switch here would visibly snap the ring's axes while dragging the observer).
 function transverseBasis(khat){
-  let ref = new THREE.Vector3(0,1,0);
-  if (Math.abs(khat.dot(ref)) > 0.95) ref = new THREE.Vector3(1,0,0);
-  const e1 = ref.clone().sub(khat.clone().multiplyScalar(ref.dot(khat))).normalize();
+  const e1 = new THREE.Vector3(0,1,0).addScaledVector(khat, -khat.y);
+  if (e1.lengthSq() < 1e-12) e1.set(-Math.cos(obsAzi), 0, -Math.sin(obsAzi)); // exactly face-on: the ι→0 limit
+  else e1.normalize();
   const e2 = new THREE.Vector3().crossVectors(khat, e1).normalize();
   return { e1, e2 };
 }
 
-// log-mapped sliders (0..1000 -> [lo,hi] geometric)
-const mapLog = (s, lo, hi) => lo*Math.pow(hi/lo, s/1000);
-const invLog = (v, lo, hi) => 1000*Math.log(v/lo)/Math.log(hi/lo);
-const MC_LO=1, MC_HI=1e9;            // chirp mass [Msun]
-const FORB_LO=0.5e-9, FORB_HI=500;   // orbital frequency [Hz]
-const D_LO=1*KPC, D_HI=10*GPC;       // distance [m]
+// orbital-frequency slider range [Hz] (the sliders hold log10 of the physical value directly)
+const FORB_LO=0.5e-9, FORB_HI=500;
 
 // human-readable helpers
 function fmtMass(Mc){
-  if (Mc>=1e8) return (Mc/1e9).toPrecision(3)+'×10⁹ M⊙';
-  if (Mc>=1e5) return (Mc/1e6).toPrecision(3)+'×10⁶ M⊙';
+  if (Mc>=1e9) return (Mc/1e9).toPrecision(3)+'×10⁹ M⊙';
+  if (Mc>=1e6) return (Mc/1e6).toPrecision(3)+'×10⁶ M⊙';
   if (Mc>=1e3) return (Mc/1e3).toPrecision(3)+'×10³ M⊙';
   return Mc.toPrecision(3)+' M⊙';
 }
@@ -589,8 +587,10 @@ function makeBH(rad){
 const binary=new THREE.Group(); scene.add(binary);
 const BH_R=0.34;
 const bh1=makeBH(BH_R), bh2=makeBH(BH_R); binary.add(bh1); binary.add(bh2);
-// merged remnant (Kerr black hole), hidden until merger; volume ≈ sum of the two → R≈2^{1/3}·r
-const remnant=makeBH(BH_R*Math.cbrt(2)); remnant.visible=false; binary.add(remnant);
+// merged remnant (Kerr black hole), hidden until merger. Horizon radius scales LINEARLY with
+// mass (R = 2GM/c²): equal-mass progenitors, ~5% radiated → R_f ≈ 0.95·2·r ≈ 1.9·r. (The area
+// theorem alone demands R_f ≥ √2·r, so "volume adding", R≈2^{1/3}·r, would violate it.)
+const remnant=makeBH(BH_R*1.9); remnant.visible=false; binary.add(remnant);
 // merger flash
 const mergeFlash=glowSprite(0xffffff, 2.0); mergeFlash.material.opacity=0; binary.add(mergeFlash);
 // faint orbit guide
@@ -735,7 +735,14 @@ function recompute(){
   $('perV').textContent   = fmtTime(per);
   $('lamV').textContent   = fmtLen(lam);
   $('strainV').textContent= fmtStrain(S.A);
-  $('regimeV').innerHTML  = '<b>'+regimeLabel(S.fgw)+'</b>';
+  // detector-band label + an ISCO sanity chip: a circular binary of this chirp mass cannot
+  // radiate steadily above f_ISCO — it has already merged (suppressed during the chirp tour,
+  // where sweeping through ISCO into merger is the whole point).
+  const fi = fISCO(S.Mc);
+  $('regimeV').innerHTML  = '<b>'+regimeLabel(S.fgw)+'</b>' + ((!S.inspiral && S.fgw>fi)
+    ? '<br><span style="color:#ff9a9a">⚠ f<sub>GW</sub> &gt; f<sub>ISCO</sub> ≈ '+fmtFreq(fi)
+      +' — a binary of this chirp mass merges before reaching this frequency, so a steady circular orbit here is unphysical.</span>'
+    : '');
   [ 'mc','forb','dist','incl','exag' ].forEach(id=>paintRange($(id)));
 
   // ringdown / final-remnant readout (only meaningful in the inspiral tour)
@@ -770,7 +777,6 @@ function updateOverlay(){
 
 /* observer direction n̂ from inclination + azimuth (drag sets these) */
 let obsAzi=0.6;
-const _yAxis=new THREE.Vector3(0,1,0);
 function obsDir(){
   const si=Math.sin(S.incl), ci=Math.cos(S.incl);
   return new THREE.Vector3(si*Math.cos(obsAzi), ci, si*Math.sin(obsAzi)).normalize();
@@ -835,9 +841,18 @@ function layoutScene(){
    ANIMATION
    ============================================================ */
 let phiOrb=0;                 // accumulated orbital phase (rad)
+let ringAmpEnv=1;             // ringdown decay envelope, shared by the wave field AND the test ring
 let last=performance.now();
 const KWAVE_REF = 2*Math.PI/4.5;   // base radial wavenumber (scene units) at ref rate
 const OM_REF = 0.30 + 1.5*0.873;   // visual orbital rate at the reference frequency (15 Hz)
+const RING_DIST = OBS_R-2.4;       // the test ring's distance from the binary (scene units)
+// GW phase as seen AT the ring/observer: retarded by the visual travel time (K·r) and carrying
+// the m=2 azimuthal pattern (2·obsAzi) — so the ring pinches exactly when a crest of the rendered
+// wave field sweeps past it, and dragging the observer around the sky slides the phase with the arms.
+function obsPhase(){
+  const K = KWAVE_REF*(visOmega()/OM_REF);
+  return 2*phiOrb - 2*obsAzi - K*RING_DIST;
+}
 
 /* ---- coalescence state machine (drives the inspiral tour) ---- */
 const INSP_DUR=9.0, MERGE_DUR=0.7, RING_DUR=3.4;     // visual seconds for each phase
@@ -937,21 +952,22 @@ function animate(){
     mergeFlash.material.opacity*=0.8;
   }
 
+  // the ringdown radiation IS the quasi-normal mode: its amplitude decays with the same
+  // e^{−t/τ} envelope as the remnant's wobble, so wave field AND test ring die out together.
+  ringAmpEnv = (S.inspiral && S.phase==='ringdown') ? Math.exp(-(S.evt/RING_DUR)*3.0) : 1;
+
   // update equatorial wave field: H = amp · falloff · cos(2φ − 2Φ_orb + K·r)
   if(S.showField){
     const pos=fieldGeo.attributes.position.array;
     const K = KWAVE_REF * (om/OM_REF);          // tighter arms at higher frequency, same outward speed
-    // the ringdown radiation IS the quasi-normal mode: its amplitude decays with the same
-    // e^{−t/τ} envelope as the remnant's wobble, so the wave dies out as the hole settles.
-    const ringEnv = (S.inspiral && S.phase==='ringdown') ? Math.exp(-(S.evt/RING_DUR)*3.0) : 1;
-    const amp = 2.2*Math.sqrt(visRel)*ringEnv;  // corrugation height tracks the strain law (compressed for the view)
+    const amp = 2.2*Math.sqrt(visRel)*ringAmpEnv;  // corrugation height tracks the strain law (compressed for the view)
     for(let k=0,vi=0; k<fieldR.length; k++,vi+=3){
       const r=fieldR[k], ph=fieldPhi[k];
       const fall = (4.0/(r+1)) * Math.min(1,(r-FIELD_IN)/2.0);   // amplitude falloff + smooth inner ramp
       pos[vi+1] = amp*fall*Math.cos(2*ph - 2*phiOrb + K*r);
     }
     fieldGeo.attributes.position.needsUpdate=true;
-    fieldMat.opacity += (0.6*ringEnv - fieldMat.opacity)*0.1;   // fades away as the remnant rings down
+    fieldMat.opacity += (0.6*ringAmpEnv - fieldMat.opacity)*0.1;   // fades away as the remnant rings down
   }
 
   // lobe fade
@@ -970,9 +986,10 @@ function animate(){
 const _wp=new THREE.Vector3();
 function deformRing(){
   const {e1,e2}=curBasis();
-  // instantaneous (exaggerated) strains seen at this inclination
-  const phaseGW=2*phiOrb;
-  const big=S.exag;
+  // instantaneous (exaggerated) strains seen at this inclination, at the RETARDED phase —
+  // the ring responds when a crest actually arrives, not when the binary emits it
+  const phaseGW=obsPhase();
+  const big=S.exag*ringAmpEnv;
   const plusShape=(1+S.ci*S.ci)/2, crossShape=S.ci;
   let hp=big*plusShape*Math.cos(phaseGW), hc=big*crossShape*Math.sin(phaseGW);
   if(S.iso==='plus')  hc=0;
@@ -1017,7 +1034,7 @@ function drawPlot(){
     // ---- STEADY: h₊(t), h×(t) over a few GW periods, with real axes ----
     const A=S.A, yMax=Math.max(A*plusShape, A*crossShape, 1e-30), yA=H*0.42/yMax;
     ytick( H*0.42, '+'+fmtStrain(yMax)); ytick(0,'0'); ytick(-H*0.42, '−'+fmtStrain(yMax));
-    const NCYC=3, NP=440, ph0=2*phiOrb, P=1/Math.max(S.fgw,1e-30);
+    const NCYC=3, NP=440, ph0=obsPhase(), P=1/Math.max(S.fgw,1e-30);
     pctx.fillStyle='#8497b5'; pctx.font='9.5px -apple-system,Arial'; pctx.textAlign='center'; pctx.textBaseline='top';
     for(let g=0;g<=NCYC;g++){ const x=m.l+g/NCYC*W; pctx.fillText(g===0?'0':fmtTime(g*P), x, m.t+H+7); }
     const drawC=(fn,color,w)=>{ pctx.strokeStyle=color; pctx.lineWidth=w; pctx.beginPath();
@@ -1126,7 +1143,7 @@ $('isoBoth').addEventListener('click',()=>setIso('both'));
 
 // guided scenarios
 const SCEN={
-  wave:{ note:'A spinning binary radiates a <b>two-armed spiral</b> of gravitational waves. The crests stream outward at <b>c</b>; their spacing is one wavelength, λ = c / f<sub>GW</sub>. Change the frequency and watch the arms tighten — the speed stays the same.',
+  wave:{ note:'An orbiting binary radiates a <b>two-armed spiral</b> of gravitational waves. The crests stream outward at <b>c</b>; their spacing is one wavelength, λ = c / f<sub>GW</sub>. Change the frequency and watch the arms tighten — the speed stays the same.',
     field:true, lobe:false, ring:false, incl:35, cam:[9,17,15], tgt:[0,1,0], inspiral:false },
   pol:{ note:'A passing wave stretches one axis while squeezing the perpendicular one — the <b>plus</b> pattern — then alternates. The <b>cross</b> pattern is the same, rotated 45°. The deformation is always in the plane <b>across</b> the wave\'s path. Try "Plus only" / "Cross only" in Details.',
     field:false, lobe:false, ring:true, incl:90, cam:[6,4,20], inspiral:false },
