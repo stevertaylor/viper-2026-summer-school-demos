@@ -824,7 +824,9 @@ function drawCurve(x0,w,y0,h,t0,t1,fn,color,width,dash){
 function drawMeters(){
   pctx.setTransform(DPR,0,0,DPR,0,0);
   pctx.clearRect(0,0,PW,PH);
-  const pad=14, topY=34, botY=PH-10, ph=botY-topY;
+  // topY clears the #plotwrap header div ("Multipole meters — last 8 s",
+  // top:13px): panel titles baseline at topY-14, badges at topY-4
+  const pad=14, topY=54, botY=PH-10, ph=botY-topY;
   const pw=(PW-5*pad)/4;
   const t1=tsim, t0=tsim-TW;
   const ref=REF[S.mode], m0=MOM[S.mode](0);
@@ -847,7 +849,7 @@ function drawMeters(){
     pctx.fillStyle=panels[p].loud?COL.accent:COL.frozen;
     pctx.fillText(panels[p].badge,x0,topY-4);
     if(p>0){ pctx.strokeStyle=COL.grid; pctx.beginPath();
-      pctx.moveTo(x0-pad/2,topY-24); pctx.lineTo(x0-pad/2,botY); pctx.stroke(); }
+      pctx.moveTo(x0-pad/2,topY-22); pctx.lineTo(x0-pad/2,botY); pctx.stroke(); }
     // zero/base gridline
     const yzero=(p===0)? botY : topY+ph/2;
     pctx.strokeStyle=COL.grid; pctx.setLineDash([3,4]); pctx.beginPath();
@@ -860,7 +862,7 @@ function drawMeters(){
       drawCurve(x0,pw,topY,ph,t0,t1,e=>botY-ph*(e.M/sc),COL.bold,2);
       pctx.fillStyle=COL.faint; pctx.font='8.5px -apple-system,sans-serif';
       pctx.fillText('0',x0+2,botY-2);
-      if(S.mode==='breathe'){ pctx.fillStyle=COL.t2; pctx.fillText('R(t) — the star pulses; M does not',x0+2,topY+9); }
+      if(S.mode==='breathe'){ pctx.fillStyle=COL.t2; pctx.fillText('R(t) pulses — M stays flat',x0+2,topY+9); }
     }
     if(p===1){ // ---- dipole: ±1.45·ref.c, contributions faint, sum bold flat
       const sc=1.45*ref.c, mid=topY+ph/2;
@@ -884,7 +886,7 @@ function drawMeters(){
         pctx.fillStyle=COL.frozen; pctx.fillText('J (spin) — conserved',x0+2,topY+ph*0.28-4);
       }
       if(S.emContrast && linearMode){
-        pctx.fillStyle=COL.em; pctx.fillText('p(t) if ± charges → EM dipole radiates',x0+2,botY-3);
+        pctx.fillStyle=COL.em; pctx.fillText('p(t) for ± charges — EM radiates',x0+2,botY-3);
       }
     }
     if(p===2){ // ---- |Q̈| bold + Q̈xx faint, 0..1.45·ref.q (norm), ± for component
@@ -909,7 +911,7 @@ function drawMeters(){
       pctx.fillStyle=COL.hp; pctx.fillText('h+',x0+2,topY+9);
       pctx.fillStyle=COL.hx; pctx.fillText('h×',x0+22,topY+9);
       pctx.fillStyle=COL.faint;
-      pctx.fillText('(emitted; reaches the ring after r/c)',x0+34,topY+9);
+      pctx.fillText('(at emission — ring lags r/c)',x0+34,topY+9);
     }
   }
 }
