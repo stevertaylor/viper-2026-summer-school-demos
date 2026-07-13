@@ -11,6 +11,7 @@ summer school. Everything is static HTML — no install, no server, no build ste
 | Demo | Topic |
 |------|-------|
 | **Gravitational Waves from Compact Binaries** | A primer on gravitational waves — watch a binary radiate a two-armed wave at the speed of light, stretch a ring of test masses in the plus and cross polarizations, and tune the chirp mass, frequency, and distance. |
+| **Why the Quadrupole?** | Try to radiate with a pulsing star (monopole) or a shaken mass (dipole) — conservation laws silence you. Live multipole meters show why gravitational radiation begins at the quadrupole. |
 | **Pulse Delays Along the Geodesic** | Integrate the metric perturbation along a photon's geodesic and watch the whole path collapse to the Earth term and the pulsar term. |
 | **Pulsar Timing & Gravitational Waves** | A passing GW from a supermassive black-hole binary nudges a pulsar's pulse arrival times — drag the pulsar and source in 3D and watch the timing residual respond. |
 | **Cross-Correlating Pulsars** | Cross-correlate pulsar pairs across a sky of GW sources until they collapse onto the Hellings & Downs curve — the fingerprint of a GW background. |
@@ -25,6 +26,7 @@ hellings-downs-demo/index.html
 geodesic-delay-demo/index.html
 binary-minidisk-photometry/index.html
 gw-binary-primer/index.html
+why-the-quadrupole/index.html
 scripts/vendor-three.sh     ← one-shot: bundle Three.js locally (already run — see vendor/)
 vendor/three-0.160.0/       ← vendored Three.js + addons; the demos' importmaps point here
 ```
