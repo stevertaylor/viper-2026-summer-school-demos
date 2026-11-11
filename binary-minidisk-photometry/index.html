@@ -394,9 +394,8 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { createPipeline, FatLine, CameraFlight, respectReducedMotion, reducedMotion } from '../shared/gfx.js';
+import { createSky } from '../shared/sky.js';
 
 /* ===================================================================
  *  PHYSICS CORE  — genuinely calibrated, real units (SI)
@@ -525,39 +524,33 @@ function lightCurve(d, s, ncyc){
  *  THREE.JS  — illustrative scene (the panels carry the exact numbers)
  * =================================================================== */
 const sceneEl=document.getElementById('scene');
-const renderer=new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance'});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
-renderer.setSize(innerWidth,innerHeight);
+// antialias:false — the pipeline draws the scene into a 4x MSAA HDR target
+const renderer=new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
 renderer.toneMapping=THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure=1.05;
+renderer.toneMappingExposure=1.18;
 renderer.outputColorSpace=THREE.SRGBColorSpace;
 sceneEl.appendChild(renderer.domElement);
 
 const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x070509);      // = --bg
 const camera=new THREE.PerspectiveCamera(46,innerWidth/innerHeight,0.05,400);
 camera.position.set(7.4,5.4,10.6);
 const controls=new OrbitControls(camera,renderer.domElement);
 controls.enableDamping=true; controls.dampingFactor=0.07;
 controls.minDistance=4.2; controls.maxDistance=46; controls.target.set(0,0,0);
 controls.autoRotateSpeed=0.5;
+respectReducedMotion(controls);
 
-const composer=new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene,camera));
-const bloom=new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight),0.82,0.55,0.0);
-composer.addPass(bloom);
+// MSAA HDR scene → bloom (only genuinely bright light) → ACES / sRGB / lens vignette / dither
+const pipeline=createPipeline({renderer, scene, camera, bloom:[0.72,0.55,0.85]});
 
 scene.add(new THREE.AmbientLight(0xffffff,0.35));
 const key=new THREE.PointLight(0xfff0e0,1.1,0,2); key.position.set(8,12,8); scene.add(key);
 const rim=new THREE.PointLight(0x6fa0ff,0.6,0,2); rim.position.set(-10,4,-8); scene.add(rim);
 
-/* --- starfield --- */
-(function stars(){
-  const N=1400, p=new Float32Array(N*3);
-  for(let i=0;i<N;i++){ const r=70+Math.random()*120, t=Math.random()*Math.PI*2, u=2*Math.random()-1, s2=Math.sqrt(1-u*u);
-    p[i*3]=r*s2*Math.cos(t); p[i*3+1]=r*u; p[i*3+2]=r*s2*Math.sin(t); }
-  const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(p,3));
-  scene.add(new THREE.Points(g,new THREE.PointsMaterial({color:0x9fb0d0,size:0.5,sizeAttenuation:true,transparent:true,opacity:0.65})));
-})();
+/* --- the real sky (BSC5 stars + Gaia/Hipparcos/Tycho diffuse map), at infinity --- */
+const sky=createSky(scene,{frame:'equatorial', renderer, mwGain:0.32, starGain:0.42,
+  rotation:new THREE.Euler(0.9,0.4,-0.35)});    // cosmetic framing only
 
 /* --- procedural textures (canvas) --- */
 function diskTexture(hot, cool){
@@ -656,7 +649,7 @@ system.add(piv1); system.add(piv2);
 /* circumbinary disk — a flattened torus: genuinely 3D, puffy, but thin */
 const CBD_OUT=10.6, CBD_R0=(CAVR+CBD_OUT)/2, CBD_TUBE=(CBD_OUT-CAVR)/2;
 const cbd=new THREE.Mesh(new THREE.TorusGeometry(CBD_R0,CBD_TUBE,28,200),
-  new THREE.MeshBasicMaterial({map:cbdTorusTexture(),transparent:true,opacity:0.95,
+  new THREE.MeshBasicMaterial({map:cbdTorusTexture(),color:0xffb67a,transparent:true,opacity:0.95,
     blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide}));
 cbd.rotation.x=-Math.PI/2; cbd.scale.set(1,1,DISK_H/CBD_TUBE);  // compress the tube → thin disk in x-z
 system.add(cbd);
@@ -664,7 +657,7 @@ system.add(cbd);
 /* thick inner cavity wall — the puffed-up "dam" where binary torques pile up gas (as in GRMHD images):
    a fatter, hotter torus standing taller than the thin disk, right at the cavity edge. */
 const cbdRim=new THREE.Mesh(new THREE.TorusGeometry(CAVR,RIM_TUBE,20,220),
-  new THREE.MeshBasicMaterial({map:cbdRimTexture(),transparent:true,opacity:0.95,
+  new THREE.MeshBasicMaterial({map:cbdRimTexture(),color:0xffc890,transparent:true,opacity:0.95,
     blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide}));
 cbdRim.rotation.x=-Math.PI/2; cbdRim.scale.set(1,1,WALL_H/RIM_TUBE);  // stands ~1.6× taller than the disk
 system.add(cbdRim);
@@ -681,7 +674,7 @@ lump.scale.set(2.2,2.2,1); system.add(lump);
 const STREAM_SEG=44, STREAM_RAD=8;
 function flowTexture(){
   const W=256,H=4,c=document.createElement('canvas'); c.width=W; c.height=H; const x=c.getContext('2d');
-  for(let i=0;i<W;i++){ const b=0.70+0.30*Math.sin(i/W*Math.PI*2*5);   // fine + low-contrast → streaming, not blobby
+  for(let i=0;i<W;i++){ const b=0.80+0.20*Math.sin(i/W*Math.PI*2*5);   // fine + low-contrast → streaming, not blobby
     x.fillStyle='rgba(255,255,255,'+b.toFixed(3)+')'; x.fillRect(i,0,1,H); }
   const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace;
   t.wrapS=THREE.RepeatWrapping; t.wrapT=THREE.ClampToEdgeWrapping; t.repeat.set(4,1); return t;
@@ -740,19 +733,78 @@ function updateStream(g,bhPos,flow){
   mat.map.offset.x=-flow;                          // scroll the texture toward the hole → continuous inflow
 }
 
-/* Einstein-ring flash (shown during a strong conjunction) */
-const eRing=new THREE.Mesh(new THREE.TorusGeometry(1,0.018,8,64),
-  new THREE.MeshBasicMaterial({color:0xfff0c0,transparent:true,opacity:0,
-    blending:THREE.AdditiveBlending,depthWrite:false}));
-system.add(eRing);
+/* ===================================================================
+ *  SELF-LENSING, RAY-TRACED FROM THE CAMERA
+ *  When a minidisk lies behind the other hole (as seen from the camera), its mesh is
+ *  replaced by a camera-facing impostor centred on the LENS hole. Each pixel's view ray d̂
+ *  makes an angle θ with the lens direction l̂; the thin point-mass lens equation
+ *        β = θ − θ_E²/θ ,   θ_E² = 4 (GM_lens/c²) D_ls / (D_l D_s)
+ *  gives the direction β of the undeflected ray, which is traced to the minidisk plane
+ *  (y = 0) and shaded with the minidisk's own texture. Surface brightness is conserved, so
+ *  the two images (θ± = (β ± √(β²+4θ_E²))/2), their magnifications and the Einstein ring at
+ *  alignment all follow from the geometry; finite-source smoothing is automatic.
+ *  GM_lens/c² is the PHYSICAL value in units of the separation, mapped to the scene
+ *  (a → AVIS): r_g = (M_lens/M)·AVIS/(2·a/R_s). Nothing is inflated: at the defaults
+ *  R_E ≈ 0.25 scene units, a little larger than the (cartoon-sized) hole glyph.
+ *  Rays with impact parameter < 3√3 GM/c² are captured (no light). The thin-lens,
+ *  weak-field deflection 4GM/(c²b) is used throughout; higher-order (photon-ring) images
+ *  are negligible in flux and are not drawn. Only the minidisks — the light sources of the
+ *  light-curve model — are lensed; the circumbinary disk, streams and sky are drawn unlensed.
+ * =================================================================== */
+const lensVert=/* glsl */`
+  uniform vec3 uLens; uniform float uR;
+  varying vec3 vWorld;
+  void main(){
+    vec3 right=vec3(viewMatrix[0][0],viewMatrix[1][0],viewMatrix[2][0]);
+    vec3 up   =vec3(viewMatrix[0][1],viewMatrix[1][1],viewMatrix[2][1]);
+    vWorld=uLens+(right*position.x+up*position.y)*uR;
+    gl_Position=projectionMatrix*viewMatrix*vec4(vWorld,1.0);
+  }`;
+const lensFrag=/* glsl */`
+  uniform sampler2D map;
+  uniform vec3 uLens, uSrc;          // lens hole, source minidisk centre (world)
+  uniform float uThetaE2, uBcrit;    // θ_E² [rad²], capture angle [rad]
+  uniform float uRm, uCoreR, uOpacity;
+  varying vec3 vWorld;
+  void main(){
+    vec3 d=normalize(vWorld-cameraPosition);
+    vec3 l=normalize(uLens-cameraPosition);
+    vec3 cr=cross(l,d); float sn=length(cr), cs=dot(l,d);
+    float th=atan(sn,cs);                          // robust for small angles
+    if(th<uBcrit) discard;                         // captured by the hole
+    vec3 e=(d-l*cs)/max(sn,1e-12);                 // unit vector in the sky plane, lens → image
+    float beta=th-uThetaE2/th;                     // thin point-mass lens equation
+    vec3 s=l*cos(beta)+e*sin(beta);                // direction to the source point
+    if(abs(s.y)<1e-7) discard;
+    float t=-cameraPosition.y/s.y;                 // hit the orbital plane y=0
+    if(t<=0.0) discard;
+    vec3 P=cameraPosition+t*s;
+    // the source's OWN hole (core sphere at the disk centre) hides what lies behind it
+    vec3 oc=cameraPosition-uSrc; float b=dot(oc,s), c=dot(oc,oc)-uCoreR*uCoreR, disc=b*b-c;
+    if(disc>0.0){ float t0=-b-sqrt(disc); if(t0>0.0 && t0<t) discard; }
+    vec2 q=(P.xz-uSrc.xz)/uRm;                     // disk-local coordinates, |q|<=1
+    if(dot(q,q)>1.0) discard;
+    vec4 tx=texture2D(map,vec2(0.5+0.5*q.x,0.5-0.5*q.y));   // PlaneGeometry rotated −π/2 about x
+    gl_FragColor=vec4(tx.rgb,tx.a*uOpacity);
+  }`;
+function makeLensImpostor(srcDisk){
+  const mat=new THREE.ShaderMaterial({
+    uniforms:{map:{value:srcDisk.material.map}, uLens:{value:new THREE.Vector3()}, uSrc:{value:new THREE.Vector3()},
+      uR:{value:1}, uThetaE2:{value:0}, uBcrit:{value:0}, uRm:{value:1}, uCoreR:{value:0.1}, uOpacity:{value:1}},
+    vertexShader:lensVert, fragmentShader:lensFrag,
+    transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, depthTest:false, side:THREE.DoubleSide});
+  const m=new THREE.Mesh(new THREE.PlaneGeometry(2,2), mat);
+  m.frustumCulled=false; m.renderOrder=10; m.visible=false; scene.add(m);
+  return m;
+}
 
 /* observer eye marker + line of sight */
 const eye=new THREE.Group(); scene.add(eye);
 const eyeSprite=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX_GLOW,color:0xbfe0ff,
   transparent:true,opacity:0.9,depthWrite:false})); eyeSprite.scale.set(0.9,0.9,1); eye.add(eyeSprite);
-const losMat=new THREE.LineBasicMaterial({color:0x6fd2ff,transparent:true,opacity:0.32});
-const losGeo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]);
-const los=new THREE.Line(losGeo,losMat); scene.add(los);
+const los=new FatLine(2,{color:0x6fd2ff, width:1.4, opacity:0.32}); scene.add(los);
+const LOS_COL=new THREE.Color(0x6fd2ff), LENS_COL=new THREE.Color(0xffe08a);   // --dopp, --lens
+const lensImp1=makeLensImpostor(md1), lensImp2=makeLensImpostor(md2);   // md1 lensed by bh2, md2 by bh1
 
 /* ===================================================================
  *  SCENE UPDATE
@@ -781,8 +833,28 @@ function rebuildGeometry(){
   const inc=D.inc;
   const n=new THREE.Vector3(0,Math.cos(inc),Math.sin(inc));
   eye.position.copy(n).multiplyScalar(OBSR);
-  losGeo.setFromPoints([n.clone().multiplyScalar(OBSR), n.clone().multiplyScalar(1.6)]);
-  losGeo.attributes.position.needsUpdate=true;
+  los.setPoints([n.clone().multiplyScalar(OBSR), n.clone().multiplyScalar(1.6)]);
+}
+
+// scene-unit gravitational radius of a hole holding mass fraction mf: GM/c² = mf·R_s/2, R_s = a/aRs
+const rgScene=mf=>mf*AVIS/(2*S.aRs);
+const _l=new THREE.Vector3(), _ds=new THREE.Vector3();
+/* choose mesh or ray-traced impostor for minidisk `md` (source) behind hole `lensPiv` */
+function updateLensing(md, imp, srcPiv, lensPiv, lensMf, srcCoreR){
+  _l.subVectors(lensPiv.position, camera.position);
+  const Dl=_l.length(); _l.divideScalar(Dl);
+  const Dls=_ds.subVectors(srcPiv.position, lensPiv.position).dot(_l);   // along the line of sight
+  const on=S.lensing && Dls>0;
+  md.visible=!on; imp.visible=on;
+  if(!on) return;
+  const rg=rgScene(lensMf), Ds=Dl+Dls, u=imp.material.uniforms;
+  u.uThetaE2.value=4*rg*Dls/(Dl*Ds);
+  u.uBcrit.value=3*Math.sqrt(3)*rg/Dl;
+  u.uLens.value.copy(lensPiv.position); u.uSrc.value.copy(srcPiv.position);
+  u.uRm.value=md.scale.x; u.uCoreR.value=srcCoreR; u.uOpacity.value=md.material.opacity;
+  // impostor half-size: reach past the far edge of the source disk (plus the Einstein radius)
+  const sep=_ds.length();
+  u.uR.value=1.15*(sep+md.scale.x)+2*Math.sqrt(u.uThetaE2.value)*Dl+0.2;
 }
 
 function updateScene(){
@@ -796,27 +868,23 @@ function updateScene(){
     return Math.pow(Math.sqrt(1-beta*beta)/(1-blos),3-S.alpha); }
   // self-lensing: a disk is the SOURCE when it lies behind (pos·n̂<0); lensed by the OTHER hole.
   // Mirror fluxAt exactly — body1 at phi (lensed by secondary), body2 at phi+π (lensed by primary).
-  let flash=0, lensPivot=null, lensRadius=1, mu1=1, mu2=1;
-  const srcBodies=[
-    {ph:phiNow,          lensMass:D.mf2, lensPiv:piv2, srcR:piv1.userData.r, set:v=>mu1=v},
-    {ph:phiNow+Math.PI,  lensMass:D.mf1, lensPiv:piv1, srcR:piv2.userData.r, set:v=>mu2=v}
-  ];
+  // the OBSERVER's (eye's) self-lensing magnification — exactly as in fluxAt — drives a cue on
+  // the line of sight. The 3D images themselves are ray-traced for the camera (updateLensing),
+  // so they coincide with the plotted flare when the camera sits on the eye's line of sight.
+  let muObs=1;
+  const srcBodies=[{ph:phiNow, lensMass:D.mf2}, {ph:phiNow+Math.PI, lensMass:D.mf1}];
   for(const b of srcBodies){
     if(S.lensing && Math.sin(b.ph)*sI < 0){
       const bsky=D.a*Math.sqrt(1-sI*sI*Math.sin(b.ph)*Math.sin(b.ph));
       const dl=D.a*Math.abs(Math.sin(b.ph))*sI;
       const RE=Math.sqrt(4*G*(b.lensMass*D.M)*Math.max(dl,1e-30)/(C*C));
-      const m=muLens(bsky/Math.max(RE,1e-30), Math.max((S.rsrc*D.Rs)/Math.max(RE,1e-30),1e-6));
-      b.set(m);
-      const f=THREE.MathUtils.clamp((m-1)/2.2,0,1);
-      if(f>flash){ flash=f; lensPivot=b.lensPiv; lensRadius=b.srcR; }
+      muObs=Math.max(muObs, muLens(bsky/Math.max(RE,1e-30), Math.max((S.rsrc*D.Rs)/Math.max(RE,1e-30),1e-6)));
     }
   }
-  // disk brightness = relativistic beaming × lensing magnification (shown, not only plotted)
+  // disk brightness = relativistic beaming toward the eye (tracks the plotted Doppler curve)
   const b1=beam(D.v1,phiNow), b2=beam(D.v2,phiNow+Math.PI);
-  // base brightness tracks each disk's luminosity share (secondary usually dominates) × beaming × lensing
-  md1.material.opacity=THREE.MathUtils.clamp((0.30+0.95*D.L1)*b1*Math.min(mu1,4),0.18,1.7);
-  md2.material.opacity=THREE.MathUtils.clamp((0.30+0.95*D.L2)*b2*Math.min(mu2,4),0.20,1.9);
+  md1.material.opacity=THREE.MathUtils.clamp((0.30+0.95*D.L1)*b1,0.18,1.7);
+  md2.material.opacity=THREE.MathUtils.clamp((0.30+0.95*D.L2)*b2,0.20,1.9);
   // lump riding the cavity inner edge, slow ~5·P drift; dim with accretion amplitude
   const la=phiNow/LUMP;
   lump.position.set(CAVR*Math.cos(la),0,CAVR*Math.sin(la));
@@ -824,16 +892,22 @@ function updateScene(){
   // accretion streams track and fall onto the orbiting minidisks
   if(S.gas){ updateStream(stream1,piv1.position,streamFlow); updateStream(stream2,piv2.position,streamFlow); }
   stream1.visible=S.gas; stream2.visible=S.gas;
-  // transient Einstein ring painted on the front (lens) black hole
-  if(flash>0 && lensPivot){
-    eRing.position.copy(lensPivot.position);
-    eRing.scale.setScalar(THREE.MathUtils.lerp(0.45,1.15,flash)*Math.max(0.5,lensRadius*0.5));
-    eRing.lookAt(eye.position);
-    eRing.material.opacity=0.9*flash*(S.gas?1:0.7);
-  } else { eRing.material.opacity=0; }
+  // lensed minidisk images, ray-traced from the camera
+  updateLensing(md1, lensImp1, piv1, piv2, D.mf2, bh1.scale.x);
+  updateLensing(md2, lensImp2, piv2, piv1, D.mf1, bh2.scale.x);
+  // line-of-sight cue: brightens and turns lens-gold while the eye sees a flare
+  const fl=THREE.MathUtils.clamp((muObs-1)/1.5,0,1);
+  los.material.color.copy(LOS_COL).lerp(LENS_COL,fl);
+  // when the camera is AT the eye, or anywhere on its line of sight, it IS the observer:
+  // fade the eye marker and the (end-on) sight line so they do not sit on top of the lens
+  const angAxis=camera.position.angleTo(eye.position);
+  const near=Math.min(THREE.MathUtils.smoothstep(camera.position.distanceTo(eye.position),1.6,3.6),
+                      THREE.MathUtils.smoothstep(angAxis,0.025,0.07));
+  los.opacity=(0.32+0.55*fl)*near;
+  eyeSprite.material.opacity=(0.9)*near; eyeSprite.scale.setScalar(0.9*(1+0.6*fl));
   // gas visibility toggle
   cbd.visible=S.gas; cbdRim.visible=S.gas;
-  eyeSprite.material.opacity=0.9; eye.visible=true;
+  eye.visible=true;
 }
 
 /* ===================================================================
@@ -983,32 +1057,40 @@ function moveInd(i){ const b=segBtns[i], p=b.parentElement.getBoundingClientRect
 
 const SCEN=[
  {t:'<b>The cast.</b> Two black holes orbit a shared center, each with a <b style="color:var(--mini2)">minidisk</b>, inside a <b style="color:var(--cbd)">circumbinary disk</b> with a cleared cavity. Set the masses, ratio and separation — everything downstream (period, speed, lensing) follows.',
-  set:{doppler:false,lensing:false,accretion:false,incDeg:62}, cam:[7.4,6.6,10.2]},
+  set:{doppler:false,lensing:false,accretion:false,gas:true,incDeg:62}, cam:[7.4,6.6,10.2]},
  {t:'<b style="color:var(--dopp)">Doppler boosting.</b> The minidisks move at a few % of c. As the (faster, brighter) secondary swings toward us its light is relativistically beamed — a smooth sinusoid. It is <b>chromatic</b>: change α and the amplitude changes.',
-  set:{doppler:true,lensing:false,accretion:false,incDeg:62,aacc:0.0}, cam:[6.2,3.0,11.2]},
- {t:'<b style="color:var(--lens)">Self-lensing.</b> Tip the orbit near edge-on. At conjunction the front hole lenses the back minidisk into a sharp, symmetric <b>flare</b> — <b>achromatic</b>, and sitting exactly where the Doppler velocity crosses zero. The window is only a few degrees wide.',
-  set:{doppler:false,lensing:true,accretion:false,incDeg:88.5,aacc:0.0}, cam:[1.2,1.0,12.4]},
+  set:{doppler:true,lensing:false,accretion:false,gas:true,incDeg:62,aacc:0.0}, cam:[6.2,3.0,11.2]},
+ {t:'<b style="color:var(--lens)">Self-lensing.</b> Tip the orbit near edge-on. At conjunction the front hole lenses the back minidisk into a sharp, symmetric <b>flare</b> — <b>achromatic</b>, and sitting exactly where the Doppler velocity crosses zero. The window is only a few degrees wide. <span style="color:var(--dim)">Seen here from the eye’s own line of sight (telephoto, gas hidden); the images are ray-traced through each hole’s true Einstein radius.</span>',
+  // camera ON the eye's line of sight n̂ = (0, cos i, sin i), so the ray-traced images are the plotted
+  // flare. Gas hidden: an observer this close to edge-on looks straight through the circumbinary disk
+  // (the light-curve model treats that disk as transparent dilution, not as an absorber).
+  // Telephoto (16° field) rather than a closer camera: the lens geometry depends only on positions,
+  // so narrowing the field magnifies the true Einstein ring without altering it.
+  set:{doppler:false,lensing:true,accretion:false,gas:false,incDeg:88.5,aacc:0.0}, fov:16,
+  cam:[0, 7.5*Math.cos(88.5*Math.PI/180), 7.5*Math.sin(88.5*Math.PI/180)]},
  {t:'<b style="color:var(--accr)">Accretion modulation.</b> Binary torques make the gas supply pulse — at the orbital period, and at the slower <b>~5 P</b> cavity "lump". This is hydrodynamic, not relativistic: an approximate template here, shown face-on so the geometry is quiet.',
-  set:{doppler:false,lensing:false,accretion:true,incDeg:24,aacc:0.5}, cam:[2.0,9.5,7.0]},
+  set:{doppler:false,lensing:false,accretion:true,gas:true,incDeg:24,aacc:0.5}, cam:[2.0,9.5,7.0]},
  {t:'<b>The real light curve.</b> Stack all three, dilute with the circumbinary disk (f<sub>CBD</sub>), and you get what a survey sees. The game is inverse: from one wiggly curve, infer which mechanism — and whether there is a binary at all.',
-  set:{doppler:true,lensing:true,accretion:true,incDeg:86,aacc:0.25,fcbd:0.35}, cam:[5.0,4.4,10.8]}
+  set:{doppler:true,lensing:true,accretion:true,gas:true,incDeg:86,aacc:0.25,fcbd:0.35}, cam:[5.0,4.4,10.8]}
 ];
-let camTween=null;
-function flyTo(p){ const from=camera.position.clone(), to=new THREE.Vector3(p[0],p[1],p[2]); let t=0;
-  camTween={from,to,t}; }
+// eased camera moves that orbit the target instead of cutting straight through the scene
+const flight=new CameraFlight(camera,controls);
+function flyTo(p){ flight.to(p,[0,0,0],1.3); }
+const FOV_WIDE=46; let fovTarget=FOV_WIDE;
 function applyPreset(i){
   moveInd(i);
   const sc=SCEN[i]; document.getElementById('scenText').innerHTML=sc.t;
   curNcyc = (i===3)?12:3;          // accretion view spans more cycles to show the ~5P lump
   // boolean toggles immediately
-  ['doppler','lensing','accretion'].forEach(k=>{ if(k in sc.set){ S[k]=sc.set[k];
-    const b={doppler:'bDopp',lensing:'bLens',accretion:'bAcc'}[k];
+  ['doppler','lensing','accretion','gas'].forEach(k=>{ if(k in sc.set){ S[k]=sc.set[k];
+    const b={doppler:'bDopp',lensing:'bLens',accretion:'bAcc',gas:'bGas'}[k];
     document.getElementById(b).classList.toggle('active',S[k]); } });
   // numeric sliders tween
   const map={incDeg:elInc,aacc:elAacc,fcbd:elFcbd};
   for(const k in map){ if(k in sc.set){ const el=map[k]; const target=sc.set[k];
     animateSlider(el,k,target); } }
   flyTo(sc.cam);
+  fovTarget=sc.fov ?? FOV_WIDE;
   recompute();
 }
 function animateSlider(el,key,target){ const from=+el.value; const steps=26; let s=0;
@@ -1049,23 +1131,31 @@ function animate(now){
     streamFlow += dt*0.32; }                   // continuous infall along the streams
   // idle handling
   idleT+=dt; if(idleT>7 && !resting){ resting=true; app.classList.add('resting'); controls.autoRotate=true; }
-  // camera tween
-  if(camTween){ camTween.t=Math.min(camTween.t+dt/0.9,1); const e=1-Math.pow(1-camTween.t,3);
-    camera.position.lerpVectors(camTween.from,camTween.to,e); if(camTween.t>=1)camTween=null; }
+  flight.update(dt);
+  // telephoto view for the lensing step; back to wide once the camera leaves the line of sight
+  if(fovTarget<FOV_WIDE && !flight.active && camera.position.angleTo(eye.position)>0.2) fovTarget=FOV_WIDE;
+  if(Math.abs(camera.fov-fovTarget)>0.01){
+    camera.fov = reducedMotion ? fovTarget : camera.fov+(fovTarget-camera.fov)*(1-Math.exp(-dt*3.5));
+    camera.updateProjectionMatrix();
+  }
   controls.update();
   updateScene();
   if(S.phase && playing){ drawLC(); drawDec(); }
-  composer.render();
+  pipeline.render();
 }
 
 /* ===================================================================
  *  RESIZE
  * =================================================================== */
-addEventListener('resize',()=>{
+function onResize(){
   camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth,innerHeight); composer.setSize(innerWidth,innerHeight);
-  bloom.resolution.set(innerWidth,innerHeight); drawLC(); drawDec();
-});
+  pipeline.setSize(innerWidth,innerHeight); drawLC(); drawDec();
+}
+addEventListener('resize',onResize);
+onResize();
+// debugging / scripted demos: MD.phi reads/sets the orbital phase, MD.playing pauses
+window.MD={S, get phi(){return phiNow;}, set phi(v){phiNow=v;}, get playing(){return playing;},
+  set playing(v){ if(v!==playing) playBtn.click(); }, camera, controls};
 
 /* ===================================================================
  *  BOOT

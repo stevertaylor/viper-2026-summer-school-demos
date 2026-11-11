@@ -26,6 +26,8 @@ DEST="vendor/three-${V}"
 #   pulsar-gw:        + TransformControls, OutputPass
 #   gw-binary-primer: + OutputPass
 #   geodesic-delay:   + Line2, LineGeometry, LineMaterial (→ LineSegments2, LineSegmentsGeometry)
+#   shared/gfx.js:    Pass (FullScreenQuad), Line2, LineSegments2, LineGeometry, LineSegmentsGeometry,
+#                     LineMaterial, EffectComposer, RenderPass, UnrealBloomPass — all listed below
 #   transitive:       ShaderPass, MaskPass, Pass (postprocessing internals);
 #                     CopyShader, LuminosityHighPassShader, OutputShader
 FILES="

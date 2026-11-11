@@ -27,9 +27,40 @@ geodesic-delay-demo/index.html
 binary-minidisk-photometry/index.html
 gw-binary-primer/index.html
 why-the-quadrupole/index.html
+shared/gfx.js               ← rendering pipeline shared by all demos (see below)
+shared/sky.js               ← the real sky: diffuse star map + Bright Star Catalog, at infinity
+shared/sky/                 ← sky data (milkyway.jpg, bsc5.js, ng15.js) — built, committed
+scripts/build_sky.py        ← rebuilds shared/sky/ from the public catalogs
 scripts/vendor-three.sh     ← one-shot: bundle Three.js locally (already run — see vendor/)
 vendor/three-0.160.0/       ← vendored Three.js + addons; the demos' importmaps point here
 ```
+
+## Shared rendering
+
+Every demo imports `shared/gfx.js` and `shared/sky.js` (plain ES modules, no build):
+
+- **HDR pipeline.** The scene is rendered into a 4× MSAA half-float target, then
+  bloom, then a finish pass that applies exposure, ACES tone mapping, the sRGB
+  transfer, a cos⁴ lens vignette and ±1 LSB dither. (The canvas's own `antialias`
+  flag has no effect once you render through an `EffectComposer`, and without an
+  output pass three r160 shows linear values as if they were sRGB.)
+- **Adaptive resolution.** If the smoothed frame time stays above ~22 ms the pixel
+  ratio steps down (2 → 1.75 → … → 1). `__gfx.pixelRatio` in the console shows the
+  current value.
+- **Fat lines** (`FatLine`, `FatSegments`): anti-aliased, constant pixel width,
+  updated in place each frame.
+- **Camera flights** orbit the target with C²-smooth easing; the OS
+  *reduce motion* setting turns flights into cuts and disables auto-rotation.
+- **The real sky**, J2000: NASA/GSFC SVS *Deep Star Maps 2020* (Hipparcos-2,
+  Tycho-2, Gaia DR2; credit NASA/Goddard Space Flight Center Scientific
+  Visualization Studio, Gaia DR2: ESA/Gaia/DPAC) for the diffuse light, plus the
+  9096 stars of the Yale Bright Star Catalog as point sources coloured by the
+  blackbody chromaticity of T_eff(B−V). Displayed star brightness is a stated
+  display stretch (√flux), not photometry. NANOGrav 15-yr pulsar positions
+  (ATNF Pulsar Catalogue) are in `shared/sky/ng15.js`.
+
+Sky assets total ~1.5 MB and are fetched once (cached across demos). To rebuild
+them, see the docstring of `scripts/build_sky.py`.
 
 The hub hosts exactly one demo in an `<iframe>` at a time and tears it down on
 exit, so only one WebGL context / animation loop is ever live — memory and CPU

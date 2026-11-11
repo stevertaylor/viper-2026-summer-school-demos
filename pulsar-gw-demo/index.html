@@ -336,10 +336,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { createPipeline, FatLine, FatSegments, CameraFlight, respectReducedMotion } from '../shared/gfx.js';
+import { createSky } from '../shared/sky.js';
 
 /* ============================================================
    PHYSICS  —  single-source continuous-wave pulsar timing
@@ -461,8 +459,9 @@ function computeResiduals(P){
    3D SCENE
    ============================================================ */
 const sceneEl = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({antialias:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+// antialias:false — the scene is drawn into a 4x MSAA HDR target by the pipeline; the
+// canvas's own MSAA would only ever see the final full-screen quad.
+const renderer = new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
 renderer.toneMapping = THREE.ACESFilmicToneMapping;   // filmic rolloff -> less flat
 renderer.toneMappingExposure = 1.05;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -477,19 +476,21 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.dampingFactor = 0.08;
 controls.autoRotate = true; controls.autoRotateSpeed = 0.45;   // gentle idle cinematic
 
-let camTween = null;
-const easeInOut = t => t<0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
-function flyTo(pos, tgt=[0,0,0], dur=0.9){       // smooth scenario fly-throughs
+respectReducedMotion(controls);
+const easeInOut = t => t<0.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;   // slider tweens
+// scenario fly-throughs: eased, orbiting the target instead of cutting a chord through it
+const flight = new CameraFlight(camera, controls);
+function flyTo(pos, tgt=[0,0,0], dur=1.25){
   controls.autoRotate=false;
-  camTween={ p0:camera.position.clone(), p1:new THREE.Vector3(...pos),
-             t0:controls.target.clone(), t1:new THREE.Vector3(...tgt), e:0, dur };
+  flight.to(pos, tgt, dur);
 }
 let idleT=null;
 function userActive(){            // pause idle auto-orbit while the user interacts
   controls.autoRotate=false;
   if(idleT) clearTimeout(idleT);
-  idleT=setTimeout(()=>{ if(!camTween) controls.autoRotate=true; }, 4500);
+  idleT=setTimeout(()=>{ if(!flight.active) controls.autoRotate=true; }, 4500);
 }
+flight.onDone = userActive;       // as before: the idle timer restarts when a flight lands
 controls.addEventListener('start', userActive);
 renderer.domElement.addEventListener('pointerdown', userActive);
 
@@ -510,40 +511,20 @@ const key = new THREE.PointLight(0xffffff, 1.7, 0, 0); key.position.set(20,30,20
 const rim  = new THREE.DirectionalLight(0x4a6cff, 0.6); rim.position.set(-16,-6,-22); scene.add(rim);
 const fill = new THREE.DirectionalLight(0xff86b0, 0.3); fill.position.set(8,-12,6); scene.add(fill);
 
-// post-processing: subtle bloom so the hot/emissive bodies actually glow.
-// Threshold keeps the dim grid & stars from washing out; only bright cores bloom.
-const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(1,1), 0.72, 0.55, 0.85);
-composer.addPass(bloom);
-composer.addPass(new OutputPass());
+// post-processing: MSAA HDR scene → subtle bloom (threshold keeps the dim grid & sky from
+// washing out; only bright cores bloom) → tone map / sRGB / lens vignette / dither
+const pipeline = createPipeline({renderer, scene, camera, bloom:[0.72, 0.55, 0.85]});
 
-// starfield — two layers, soft round points, stellar colour variation
-(() => {
-  const starTex=(()=>{ const c=document.createElement('canvas'); c.width=c.height=32;
-    const x=c.getContext('2d'); const gr=x.createRadialGradient(16,16,0,16,16,16);
-    gr.addColorStop(0,'rgba(255,255,255,1)'); gr.addColorStop(.35,'rgba(255,255,255,.65)');
-    gr.addColorStop(1,'rgba(255,255,255,0)'); x.fillStyle=gr; x.fillRect(0,0,32,32);
-    return new THREE.CanvasTexture(c); })();
-  const palette=[0xfff4e8,0xffe1bf,0xcfe0ff,0xb9ccff,0xffffff,0xffd1a8];
-  const make=(n, size, op)=>{
-    const g=new THREE.BufferGeometry();
-    const pos=new Float32Array(n*3), col=new Float32Array(n*3), cc=new THREE.Color();
-    for(let i=0;i<n;i++){
-      const r=220+Math.random()*620, th=Math.random()*Math.PI*2, ph=Math.acos(2*Math.random()-1);
-      pos[3*i]=r*Math.sin(ph)*Math.cos(th); pos[3*i+1]=r*Math.cos(ph); pos[3*i+2]=r*Math.sin(ph)*Math.sin(th);
-      cc.setHex(palette[(Math.random()*palette.length)|0]).multiplyScalar(0.55+Math.random()*0.45);
-      col[3*i]=cc.r; col[3*i+1]=cc.g; col[3*i+2]=cc.b;
-    }
-    g.setAttribute('position', new THREE.BufferAttribute(pos,3));
-    g.setAttribute('color', new THREE.BufferAttribute(col,3));
-    scene.add(new THREE.Points(g, new THREE.PointsMaterial({size, map:starTex,
-      vertexColors:true, transparent:true, opacity:op, sizeAttenuation:false,
-      depthWrite:false, blending:THREE.AdditiveBlending})));
-  };
-  make(1200, 2.0, 0.85);   // fine background stars
-  make(280,  4.2, 1.0);    // brighter foreground stars
-})();
+// the real sky at infinity (BSC5 stars + Hipparcos/Tycho/Gaia diffuse map), in the
+// ECLIPTIC frame (scene +Y = ecliptic north), so Earth's tilted spin axis below points at
+// the real north celestial pole. The pulsar sits inside the Milky Way — that band — while
+// the SMBHB's host galaxy is the small spiral riding with the source.
+// The yaw about the ecliptic pole is cosmetic framing (it only chooses which ecliptic longitude
+// faces +X): 234° runs the galactic plane, Galactic Centre 21° off-axis, through the patch
+// of sky behind Earth in every scenario view. Earth's axis follows sky.pole, so it stays
+// pointed at the real NCP whatever the yaw.
+const sky = createSky(scene, {frame:'ecliptic', renderer, mwGain:0.42, starGain:0.55,
+  rotation:new THREE.Euler(0, THREE.MathUtils.degToRad(234), 0)});
 
 // ---- Earth (procedural surface + atmospheric rim) ----
 const earth = (() => {
@@ -569,7 +550,12 @@ const earth = (() => {
   const e=new THREE.Mesh(new THREE.SphereGeometry(0.85,64,64),
     new THREE.MeshStandardMaterial({map:tex, roughness:.88, metalness:.05,
       emissive:0x0a1830, emissiveIntensity:.22}));
-  scene.add(e);
+  // root (unrotated: carries the label) → tilt (local +Y → north celestial pole) → spinning body.
+  // Spinning the child about its OWN y keeps the axis fixed on the sky; the old
+  // rotation.z-then-rotation.y Euler pair made the axis precess around scene +Y.
+  const root=new THREE.Group(), tilt=new THREE.Group();
+  tilt.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), sky.pole);
+  root.add(tilt); tilt.add(e); scene.add(root);
   // fresnel atmosphere shell (blue limb glow)
   const atm=new THREE.Mesh(new THREE.SphereGeometry(0.96,48,48),
     new THREE.ShaderMaterial({transparent:true, side:THREE.BackSide, depthWrite:false,
@@ -582,7 +568,7 @@ const earth = (() => {
         void main(){ float f=pow(1.-max(dot(vN,vV),0.),3.0);
           gl_FragColor=vec4(glow, f*0.9); }`}));
   e.add(atm);
-  e.rotation.z=0.41; e.add(makeLabel('Earth', '#4ea8ff'));
+  root.add(makeLabel('Earth', '#4ea8ff'));
   return e;
 })();
 
@@ -630,7 +616,6 @@ const capA=new THREE.Mesh(new THREE.SphereGeometry(0.085,14,14),capMat); capA.po
 const capB=capA.clone(); capB.position.y=-0.28; mag.add(capB);
 
 // dipole magnetic field lines  r(θ)=Lmax·sin²θ  (meridional loops, several azimuths)
-const fieldMat=new THREE.LineBasicMaterial({color:0x5aa0ff,transparent:true,opacity:0.45});
 for(let j=0;j<6;j++){
   const phi=j*Math.PI/3, pts=[];
   for(let kk=1;kk<40;kk++){
@@ -638,7 +623,7 @@ for(let j=0;j<6;j++){
     const xr=r*Math.sin(th), yy=r*Math.cos(th);
     pts.push(new THREE.Vector3(xr*Math.cos(phi), yy, xr*Math.sin(phi)));
   }
-  mag.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), fieldMat));
+  mag.add(new FatLine(pts.length,{color:0x5aa0ff, width:1.0, opacity:0.5, points:pts}));
 }
 pulsar.add(makeLabel('Pulsar', '#ffd166', 0.9));
 
@@ -682,8 +667,11 @@ const accDisc = new THREE.Mesh(new THREE.PlaneGeometry(2.6,2.6),
 accDisc.rotation.x = Math.PI/2;          // normal -> local +y (the orbital plane)
 emitterPivot.add(accDisc);
 // orbital angular-momentum axis L̂
-emitterPivot.add(new THREE.ArrowHelper(new THREE.Vector3(0,1,0), new THREE.Vector3(0,0,0),
-  4.2, 0xffd9e6, 0.5, 0.28));
+// (ArrowHelper draws a 1-px GL line; build it from a fat line + cone instead)
+emitterPivot.add(new FatLine(2,{color:0xffd9e6, width:1.8,
+  points:[new THREE.Vector3(0,0,0), new THREE.Vector3(0,4.2-0.5,0)]}));
+const lHead=new THREE.Mesh(new THREE.ConeGeometry(0.14,0.5,20), new THREE.MeshBasicMaterial({color:0xffd9e6}));
+lHead.position.y=4.2-0.25; emitterPivot.add(lHead);
 source.add(makeLabel('SMBHB · distant galaxy','#ff6b9d',1.0));
 
 // host galaxy: the binary lives in a galactic nucleus FAR outside our own Galaxy.
@@ -738,13 +726,15 @@ function buildLobeWire(Nt, Np){
     const th=Math.PI*it/Nt;
     for(let ip=0; ip<Np; ip++) segs.push(P(th, 2*Math.PI*ip/Np), P(th, 2*Math.PI*(ip+1)/Np));
   }
-  return new THREE.BufferGeometry().setFromPoints(segs);
+  const flat=new Float32Array(segs.length*3);
+  segs.forEach((v,i)=>{ flat[3*i]=v.x; flat[3*i+1]=v.y; flat[3*i+2]=v.z; });
+  return flat;                                    // 6 numbers per segment
 }
-const lobeGeo = buildLobeWire(12, 24);
+const lobeSegs = buildLobeWire(12, 24);
 const GW_GREEN = 0x46e8a0;
 // faint steady envelope showing the angular flux distribution
-const fluxLobe = new THREE.LineSegments(lobeGeo, new THREE.LineBasicMaterial({
-  color:GW_GREEN, transparent:true, opacity:0.10, depthWrite:false}));
+const fluxLobe = new FatSegments(lobeSegs.length/6, {color:GW_GREEN, width:0.85, opacity:0.13,
+  segments:lobeSegs});
 fluxLobe.scale.setScalar(3.6); emitterPivot.add(fluxLobe);
 // ---- plane wavefronts: sheets marching source -> Earth, FLATTENING as they go.
 // A wavefront's radius of curvature equals the distance it has covered, so near
@@ -760,25 +750,20 @@ for(let i=0;i<WF_G;i++) for(let j=0;j<WF_G;j++){
   if(i<WF_G-1) wfIdx.push(id, id+WF_G);
 }
 const wavefronts = [];
+const WF_NSEG = wfIdx.length/2, wfSeg = new Float32Array(WF_NSEG*6);   // shared scratch
 for(let w=0; w<WF_N; w++){
   const npos=new Float32Array(WF_G*WF_G*3);
-  const geo=new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(npos,3));
-  geo.setIndex(wfIdx);
-  const ls=new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
-    color:GW_GREEN, transparent:true, opacity:0.0, depthWrite:false}));
+  const ls=new FatSegments(WF_NSEG, {color:GW_GREEN, width:0.85, opacity:0.0, transparent:true});
   ls.userData={ phase:(w+0.5)/WF_N, npos };
   scene.add(ls); wavefronts.push(ls);
 }
 
 // ---- line of sight Earth -> pulsar ----
-const losMat = new THREE.LineDashedMaterial({color:0x5dd6ff,dashSize:0.4,gapSize:0.25,transparent:true,opacity:.7});
-const losGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]);
-const los = new THREE.Line(losGeo, losMat); scene.add(los);
+const los = new FatLine(2, {color:0x5dd6ff, width:1.3, opacity:0.75, dashed:true, dashSize:0.4, gapSize:0.25});
+scene.add(los);
 
 // ---- direction Earth -> source (wave incoming) ----
-const srcRayMat = new THREE.LineBasicMaterial({color:0xff6b9d,transparent:true,opacity:.35});
-const srcRay = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]), srcRayMat);
+const srcRay = new FatLine(2, {color:0xff6b9d, width:1.1, opacity:0.4});
 scene.add(srcRay);
 // scale-break placard riding the source->Earth connector ("not to scale")
 const scaleTag = makeTag('↯ in a distant galaxy', '~100 Mpc away · not to scale');
@@ -797,10 +782,7 @@ for(let ia=0;ia<NA;ia++) for(let iu=0;iu<NU;iu++){
   if(iu<NU-1) latSegs.push([ia,iu,ia,iu+1]); // transverse lines
 }
 const gridPos = new Float32Array(latSegs.length*2*3);
-const gridGeo = new THREE.BufferGeometry();
-gridGeo.setAttribute('position', new THREE.BufferAttribute(gridPos,3));
-const gridMesh = new THREE.LineSegments(gridGeo,
-  new THREE.LineBasicMaterial({color:0x46e8a0,transparent:true,opacity:0.45}));
+const gridMesh = new FatSegments(latSegs.length, {color:0x46e8a0, width:1.0, opacity:0.45});
 gridMesh.visible = false; scene.add(gridMesh);
 
 const _khat = new THREE.Vector3();
@@ -809,14 +791,18 @@ function updateGrid(tYr){
   const { m, n, plusShape, crossShape, phaseAtYr } = lastResult;
   const src = source.position;
   const kHat = _khat.copy(src).multiplyScalar(-1).normalize();  // source -> Earth
-  const aMax = src.length() + 4;                 // sheet reaches just past Earth
+  const D    = src.length();                     // source → Earth distance along k̂
+  const aMax = D + 4;                            // sheet reaches just past Earth
   const kvis = 2*Math.PI*GRID_NWAVE/aMax;        // ~GRID_NWAVE crests source→Earth
-  const phE  = phaseAtYr(tYr);
+  const phE  = phaseAtYr(tYr);                   // Earth-term GW phase (as in the residual)
   let o=0;
   const place=(ia,iu)=>{
     const a = aMax*ia/(NA-1);                     // distance from source along k̂
     const u = -GRID_W + 2*GRID_W*iu/(NU-1);       // transverse offset along m̂
-    const ph = phE - kvis*a;                      // retarded -> wave travels to Earth
+    // retarded phase, referenced to Earth: a point a distance (D−a) upstream of Earth already
+    // shows what Earth will see (D−a)/c later, so at Earth (a=D) the sheet is exactly in
+    // phase with the Earth term h(t_E) driving the plotted residual.
+    const ph = phE + kvis*(D - a);
     const hp = plusShape*Math.cos(ph), hx = crossShape*Math.sin(ph);
     const um = u*(1 + 0.5*GRID_GAIN*hp);          // transverse stretch (m̂ component)
     const un = 0.5*GRID_GAIN*hx*u;                //                    (n̂ component)
@@ -825,7 +811,7 @@ function updateGrid(tYr){
     gridPos[o++] = src.z + a*kHat.z + um*m.z + un*n.z;
   };
   for(const s of latSegs){ place(s[0],s[1]); place(s[2],s[3]); }
-  gridGeo.attributes.position.needsUpdate = true;
+  gridMesh.setSegments(gridPos);
 }
 
 // advance the plane-wavefront sheets along k̂, bowing each by the sphere sagitta
@@ -864,8 +850,13 @@ function updateWavefronts(dt){
         np[o++] = cz + m.z*a + n.z*b - kHat.z*sag;
       }
     }
-    ls.geometry.attributes.position.needsUpdate = true;
-    ls.material.opacity = 0.32*Math.min(1, 1.8*Math.sin(Math.PI*p));   // fade edges, plateau across
+    for(let k=0;k<WF_NSEG;k++){                // lattice node pairs -> fat segments
+      const i0=3*wfIdx[2*k], i1=3*wfIdx[2*k+1], o6=6*k;
+      wfSeg[o6]=np[i0]; wfSeg[o6+1]=np[i0+1]; wfSeg[o6+2]=np[i0+2];
+      wfSeg[o6+3]=np[i1]; wfSeg[o6+4]=np[i1+1]; wfSeg[o6+5]=np[i1+2];
+    }
+    ls.setSegments(wfSeg);
+    ls.material.opacity = 0.2*Math.min(1, 1.8*Math.sin(Math.PI*p));    // fade edges, plateau across
   }
 }
 
@@ -900,9 +891,10 @@ const skyPatch = (()=>{
     for(let s=0;s<SEG;s++) segs.push(pt(ax,-H+2*H*s/SEG), pt(ax,-H+2*H*(s+1)/SEG)); }
   for(let j=-N;j<=N;j++){ const ay=H*j/N;           // parallels (constant ay)
     for(let s=0;s<SEG;s++) segs.push(pt(-H+2*H*s/SEG,ay), pt(-H+2*H*(s+1)/SEG,ay)); }
-  const m=new THREE.LineBasicMaterial({color:0x9fc6ff, transparent:true,
-    opacity:0, depthWrite:false, blending:THREE.AdditiveBlending});
-  const ls=new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(segs), m);
+  const flat=new Float32Array(segs.length*3);
+  segs.forEach((v,i)=>{ flat[3*i]=v.x; flat[3*i+1]=v.y; flat[3*i+2]=v.z; });
+  const ls=new FatSegments(segs.length/2, {color:0x9fc6ff, width:1.0, opacity:0, additive:true,
+    segments:flat});
   ls.scale.setScalar(R_SOURCE); scene.add(ls); return ls;
 })();
 const _zAxis = new THREE.Vector3(0,0,1);
@@ -965,6 +957,9 @@ const S = {
 };
 let lastResult = null;
 let ready = false;   // gate recompute until plot canvas + DOM refs exist
+// expose handles (debugging / scripted demos), like window.GW in the primer
+window.PSR = { S, camera, controls, get flight(){ return flight; }, pulsar, source, tcontrols, sky,
+  get result(){ return lastResult; } };
 
 function $(id){ return document.getElementById(id); }
 // Apple-style filled track: accent to the left of the thumb, faint track to the right
@@ -1150,11 +1145,10 @@ function recompute(){
   skyPatch.quaternion.setFromUnitVectors(_zAxis, S.sHat);   // patch follows the source's sky direction
 
   // line of sight Earth->pulsar
-  losGeo.setFromPoints([new THREE.Vector3(0,0,0), pulsar.position.clone()]);
-  los.computeLineDistances();
+  los.setPoints([new THREE.Vector3(0,0,0), pulsar.position]);
   // incoming wave direction line (source toward Earth, drawn past Earth a bit)
   const sdir = source.position.clone().normalize();
-  srcRay.geometry.setFromPoints([source.position.clone(), sdir.multiplyScalar(-3)]);
+  srcRay.setPoints([source.position, sdir.multiplyScalar(-3)]);
   // ride the placard ~halfway along the connector, lifted clear of the line
   scaleTag.position.copy(source.position).multiplyScalar(0.5);
   scaleTag.position.y += 1.4;
@@ -1276,9 +1270,7 @@ function drawPlot(){
    ============================================================ */
 function resize(){
   const r=sceneEl.getBoundingClientRect();
-  renderer.setSize(r.width, r.height, false);   // false: let CSS size the canvas (cinematic slide)
-  composer.setSize(r.width, r.height);
-  bloom.setSize(r.width, r.height);
+  pipeline.setSize(r.width, r.height, false);   // false: let CSS size the canvas (cinematic slide)
   camera.aspect=r.width/r.height; camera.updateProjectionMatrix();
   sizePlot(); drawPlot();
   if(_activeScen) selectScenario(_activeScen);   // keep the segmented indicator aligned
@@ -1332,15 +1324,9 @@ function animate(){
   earth.rotation.y += dt*0.05;            // gentle planetary spin
   galaxy.userData.spin.rotation.y += dt*0.03;   // host galaxy turns slowly
 
-  if(camTween){                           // smooth fly-to for scenario presets
-    camTween.e += dt/camTween.dur;
-    const k=easeInOut(Math.min(camTween.e,1));
-    camera.position.lerpVectors(camTween.p0, camTween.p1, k);
-    controls.target.lerpVectors(camTween.t0, camTween.t1, k);
-    if(camTween.e>=1){ camTween=null; userActive(); }
-  }
+  flight.update(dt);                      // smooth fly-to for scenario presets
   controls.update();
-  composer.render();
+  pipeline.render();
 
   if(!_loaderHidden){            // first painted frame -> fade out the loading shimmer
     _loaderHidden=true;

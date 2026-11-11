@@ -327,10 +327,8 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { createPipeline, FatLine, FatSegments, CameraFlight, respectReducedMotion } from '../shared/gfx.js';
+import { createSky } from '../shared/sky.js';
 
 /* ============================================================
    PHYSICS  —  a circular compact binary's gravitational wave
@@ -485,8 +483,9 @@ window.GW=S;                  // expose state (handy for debugging / scripted de
    3D SCENE
    ============================================================ */
 const sceneEl = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({antialias:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+// antialias:false — the scene is drawn into a 4x MSAA HDR target by the pipeline; the
+// canvas's own MSAA would only ever see the final full-screen quad.
+const renderer = new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.06;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -502,17 +501,18 @@ controls.enableDamping = true; controls.dampingFactor = 0.08;
 controls.autoRotate = true; controls.autoRotateSpeed = 0.4;
 controls.minDistance = 6; controls.maxDistance = 120;
 
-// camera fly-throughs for guided scenarios
-let camTween=null;
-function flyTo(pos, tgt=[0,0,0], dur=0.95){
+respectReducedMotion(controls);
+// camera fly-throughs for guided scenarios: eased, and orbiting the target rather than
+// cutting a straight chord through the scene
+const flight=new CameraFlight(camera, controls);
+function flyTo(pos, tgt=[0,0,0], dur=1.25){
   controls.autoRotate=false;
-  camTween={ p0:camera.position.clone(), p1:new THREE.Vector3(...pos),
-    t0:controls.target.clone(), t1:new THREE.Vector3(...tgt), e:0, dur };
+  flight.to(pos, tgt, dur);
 }
 let idleT;
 function userActive(){
   controls.autoRotate=false; clearTimeout(idleT);
-  idleT=setTimeout(()=>{ if(!camTween) controls.autoRotate=true; }, 5000);
+  idleT=setTimeout(()=>{ if(!flight.active) controls.autoRotate=true; }, 5000);
 }
 controls.addEventListener('start', userActive);
 
@@ -524,43 +524,17 @@ window.addEventListener('pointermove', uiActive);
 window.addEventListener('keydown', uiActive);
 uiActive();
 
-// post-processing bloom
-const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(1,1), 0.78, 0.6, 0.82);
-composer.addPass(bloom);
-composer.addPass(new OutputPass());
+// post-processing: MSAA HDR scene → bloom → tone map / sRGB / lens vignette / dither
+const pipeline = createPipeline({renderer, scene, camera, bloom:[0.78, 0.6, 0.82]});
 
 // lighting
 scene.add(new THREE.AmbientLight(0xffffff, 0.34));
 const key=new THREE.PointLight(0xfff0e0,1.1,0,2); key.position.set(10,16,10); scene.add(key);
 const rim=new THREE.PointLight(0x8a6bff,0.7,0,2); rim.position.set(-12,5,-10); scene.add(rim);
 
-// starfield
-(() => {
-  const starTex=(()=>{ const c=document.createElement('canvas'); c.width=c.height=32;
-    const x=c.getContext('2d'); const gr=x.createRadialGradient(16,16,0,16,16,16);
-    gr.addColorStop(0,'rgba(255,255,255,1)'); gr.addColorStop(.35,'rgba(255,255,255,.65)');
-    gr.addColorStop(1,'rgba(255,255,255,0)'); x.fillStyle=gr; x.fillRect(0,0,32,32);
-    return new THREE.CanvasTexture(c); })();
-  const palette=[0xfff4e8,0xffe1bf,0xcfe0ff,0xb9ccff,0xffffff,0xe6d1ff];
-  const make=(n,size,op)=>{
-    const g=new THREE.BufferGeometry();
-    const pos=new Float32Array(n*3), col=new Float32Array(n*3), cc=new THREE.Color();
-    for(let i=0;i<n;i++){
-      const r=260+Math.random()*900, th=Math.random()*Math.PI*2, ph=Math.acos(2*Math.random()-1);
-      pos[3*i]=r*Math.sin(ph)*Math.cos(th); pos[3*i+1]=r*Math.cos(ph); pos[3*i+2]=r*Math.sin(ph)*Math.sin(th);
-      cc.setHex(palette[(Math.random()*palette.length)|0]).multiplyScalar(0.55+Math.random()*0.45);
-      col[3*i]=cc.r; col[3*i+1]=cc.g; col[3*i+2]=cc.b;
-    }
-    g.setAttribute('position', new THREE.BufferAttribute(pos,3));
-    g.setAttribute('color', new THREE.BufferAttribute(col,3));
-    scene.add(new THREE.Points(g, new THREE.PointsMaterial({size, map:starTex,
-      vertexColors:true, transparent:true, opacity:op, sizeAttenuation:false,
-      depthWrite:false, blending:THREE.AdditiveBlending})));
-  };
-  make(1400, 2.0, 0.85); make(300, 4.2, 1.0);
-})();
+// the real sky (BSC5 stars + Gaia/Hipparcos/Tycho diffuse map), at infinity
+const sky = createSky(scene, {frame:'equatorial', renderer, mwGain:0.5, starGain:0.55,
+  rotation:new THREE.Euler(0.35, 2.2, 0.5)});   // cosmetic framing: Milky Way arcs behind the binary
 
 /* ---- the binary (orbital plane x–z, angular momentum +y) ---- */
 function glowSprite(color, size){
@@ -599,28 +573,96 @@ const orbitGuide=new THREE.Mesh(new THREE.RingGeometry(0.99,1.01,96),
 orbitGuide.rotation.x=-Math.PI/2; binary.add(orbitGuide);
 
 // orbital angular-momentum axis L̂ (+y)
-const axisMat=new THREE.LineBasicMaterial({color:0x8aa0c8,transparent:true,opacity:0.7});
-const axisGeo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),new THREE.Vector3(0,3.4,0)]);
-const spinAxis=new THREE.Line(axisGeo,axisMat); scene.add(spinAxis);
+const spinAxis=new FatLine(2,{color:0x8aa0c8, width:1.6, opacity:0.7,
+  points:[new THREE.Vector3(0,0,0),new THREE.Vector3(0,3.4,0)]}); scene.add(spinAxis);
 const axisCone=new THREE.Mesh(new THREE.ConeGeometry(0.12,0.34,16),
   new THREE.MeshBasicMaterial({color:0x8aa0c8})); axisCone.position.set(0,3.55,0); scene.add(axisCone);
 
-/* ---- equatorial wave field: a grid disk in x–z, displaced in y ----
-   The two-armed (m=2) pattern winds into a spiral and streams outward at
-   a constant scene "speed of light". Higher f_GW → tighter arms (shorter λ),
-   the same outward speed: this is the wavelength λ = c / f_GW relation. */
-const FIELD_IN=2.6, FIELD_OUT=26, FIELD_RAD=64, FIELD_SEC=160;
-const fieldGeo=new THREE.RingGeometry(FIELD_IN, FIELD_OUT, FIELD_SEC, FIELD_RAD);
+/* ---- equatorial wave field: a disk in x–z, displaced in y, evaluated on the GPU ----
+   In the orbital plane only h₊ survives, and at radius r and azimuth φ it is the
+   quadrupole pattern evaluated at the RETARDED time t − r/c:
+
+       H(r, φ, t) = A(t − r/c) · f(r) · cos[ 2φ − 2Φ_orb(t − r/c) ]
+
+   Φ_orb and the emitted amplitude A are recorded every frame (fieldHist below) and
+   looked up per vertex, so the field is causal: during the chirp the arms near the
+   source are tighter than the outer arms (emitted earlier, at lower frequency); a
+   slider change, the merger and the ringdown decay all propagate outward at c
+   instead of updating the whole disk at once. In steady state this reduces exactly
+   to the old form cos(2φ − 2Φ + K r) with K = 2Ω/c. f(r) ∝ 1/r with a smooth inner
+   ramp; the height is the strain compressed for the view (absolute h is in the
+   readouts). The grid lines are drawn analytically in (r, φ) with screen-space
+   filtering, so they stay crisp near and fade out (instead of moiré-ing) far away. */
+const FIELD_IN=2.6, FIELD_OUT=26;
+// 300 radial rows: >= 12 vertices per wavelength even for the merger burst (λ ≈ 1 scene unit)
+const fieldGeo=new THREE.RingGeometry(FIELD_IN, FIELD_OUT, 320, 300);
 fieldGeo.rotateX(-Math.PI/2);                 // lie in x–z, normal +y
-const fieldBase=fieldGeo.attributes.position.array.slice();   // base x,z
-const fieldR=[], fieldPhi=[];
-for(let i=0;i<fieldBase.length;i+=3){
-  const x=fieldBase[i], z=fieldBase[i+2];
-  fieldR.push(Math.hypot(x,z)); fieldPhi.push(Math.atan2(z,x));
-}
-const fieldMat=new THREE.MeshBasicMaterial({color:0xd089ff, wireframe:true,
-  transparent:true, opacity:0.0, blending:THREE.AdditiveBlending, depthWrite:false});
-const waveField=new THREE.Mesh(fieldGeo, fieldMat); scene.add(waveField);
+const HIST_N=512;                             // retarded-time samples handed to the GPU
+const histData=new Float32Array(HIST_N*4);
+const histTex=new THREE.DataTexture(histData, HIST_N, 1, THREE.RGBAFormat, THREE.FloatType);
+histTex.minFilter=histTex.magFilter=THREE.NearestFilter; histTex.needsUpdate=true;
+const fieldMat=new THREE.ShaderMaterial({
+  uniforms:{
+    uHist:{value:histTex}, uHistT:{value:1}, uC:{value:1}, uPhi:{value:0},
+    uIn:{value:FIELD_IN}, uOut:{value:FIELD_OUT}, uDr:{value:0.366}, uSpokes:{value:160},
+    uLine:{value:new THREE.Color(0xd089ff)}, uCrest:{value:new THREE.Color(0xff8ad8)},
+    uTrough:{value:new THREE.Color(0x5a6cff)}, uGain:{value:0.0},
+  },
+  vertexShader:/* glsl */`
+    uniform sampler2D uHist; uniform float uHistT, uC, uPhi, uIn;
+    varying float vR, vPhi, vH, vEnv;
+    varying vec3 vW;
+    const int N = ${HIST_N};
+    void main(){
+      float r = length(position.xz), ph = atan(position.z, position.x);
+      float s = clamp(r / uC / uHistT, 0.0, 1.0) * float(N - 1);     // retarded-time sample
+      int i = int(floor(s)); float w = s - float(i);
+      vec4 a = texelFetch(uHist, ivec2(i, 0), 0), b = texelFetch(uHist, ivec2(min(i + 1, N - 1), 0), 0);
+      vec4 h = mix(a, b, w);                 // x: Φ(t_ret) − Φ(t), y: displacement amplitude, z: envelope
+      float psi = 2.0 * ph - 2.0 * (uPhi + h.x);
+      float fall = (4.0 / (r + 1.0)) * min(1.0, (r - uIn) / 2.0);
+      float c = cos(psi);
+      vH = c; vEnv = h.z; vR = r; vPhi = ph;
+      vec4 wp = modelMatrix * vec4(position.x, h.y * fall * c, position.z, 1.0);
+      vW = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }`,
+  fragmentShader:/* glsl */`
+    uniform float uIn, uOut, uDr, uSpokes, uGain;
+    uniform vec3 uLine, uCrest, uTrough;
+    varying float vR, vPhi, vH, vEnv;
+    varying vec3 vW;
+    const float PI = 3.141592653589793;
+    // anti-aliased grid line of unit-spaced coordinate u: ~1.1 px wide, faded out
+    // where the cells shrink below ~3 px on screen (no moiré)
+    float gridLine(float u, float du){
+      float d = abs(fract(u - 0.5) - 0.5) / max(du, 1e-6);
+      float line = 1.0 - smoothstep(0.35, 1.25, d);
+      return line * smoothstep(0.42, 0.18, du);
+    }
+    void main(){
+      float ur = (vR - uIn) / uDr;
+      float dur = fwidth(ur);
+      // seam-free derivative of the angular coordinate (atan jumps at ±π)
+      float us = vPhi / (2.0 * PI) * uSpokes, us2 = fract(vPhi / (2.0 * PI) + 0.5) * uSpokes;
+      float dus = min(fwidth(us), fwidth(us2));
+      // spoke level of detail: every 4th spoke everywhere, every 2nd beyond r≈5, all beyond r≈10
+      float k = floor(us + 0.5);
+      float lod = mod(k, 4.0) < 0.5 ? 1.0 : (mod(k, 2.0) < 0.5 ? smoothstep(4.0, 6.0, vR) : smoothstep(8.5, 11.0, vR));
+      float g = max(gridLine(ur, dur), gridLine(us, dus) * lod);
+      // relief: Lambert term from the true surface normal (screen-space derivatives of position)
+      vec3 n = normalize(cross(dFdx(vW), dFdy(vW)));
+      vec3 v = normalize(cameraPosition - vW);
+      if (dot(n, v) < 0.0) n = -n;
+      float shade = 0.45 + 0.55 * max(dot(n, normalize(vec3(0.35, 1.0, 0.25))), 0.0);
+      float edge = smoothstep(uOut, uOut - 3.0, vR);                   // soft outer rim
+      vec3 fill = (vH > 0.0 ? uCrest : uTrough) * abs(vH) * 0.10;    // sign of h₊: crest / trough
+      vec3 col = (uLine * g * 0.85 + fill) * shade * (0.25 + 0.75 * vEnv) * edge * uGain;
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, side:THREE.DoubleSide,
+});
+const waveField=new THREE.Mesh(fieldGeo, fieldMat); waveField.frustumCulled=false; scene.add(waveField);
 
 /* ---- radiation flux lobe: surface of revolution about +y ----
    radius ∝ (1 + 6cos²θ + cos⁴θ)/8, θ measured from the +y axis. */
@@ -635,9 +677,20 @@ const lobeMat=new THREE.MeshStandardMaterial({color:0x7a3bd6, emissive:0x4a1f8a,
   emissiveIntensity:0.5, roughness:0.6, metalness:0.0, transparent:true, opacity:0.0,
   side:THREE.DoubleSide, depthWrite:false});
 const fluxLobe=new THREE.Mesh(lobeGeo, lobeMat); scene.add(fluxLobe);
-const lobeWire=new THREE.Mesh(lobeGeo.clone(),
-  new THREE.MeshBasicMaterial({color:0xb06bff, wireframe:true, transparent:true, opacity:0.0,
-    depthWrite:false})); scene.add(lobeWire);
+// meridians + parallels of the same surface r(θ) = LOBE_R·(1+6cos²θ+cos⁴θ)/8, as fat lines
+// (a triangle wireframe would add diagonals that carry no meaning)
+const lobeWire=(()=>{
+  const NM=24, NP=11, NS=96, segs=[];
+  const pt=(th,az)=>{ const R=LOBE_R*fluxPattern(Math.cos(th));
+    return [R*Math.sin(th)*Math.cos(az), R*Math.cos(th), R*Math.sin(th)*Math.sin(az)]; };
+  for(let m=0;m<NM;m++){ const az=m/NM*2*Math.PI;                       // meridians
+    for(let i=0;i<NS;i++) segs.push(...pt(i/NS*Math.PI,az), ...pt((i+1)/NS*Math.PI,az)); }
+  for(let k=1;k<=NP;k++){ const th=k/(NP+1)*Math.PI;                   // parallels
+    for(let i=0;i<NS;i++) segs.push(...pt(th,i/NS*2*Math.PI), ...pt(th,(i+1)/NS*2*Math.PI)); }
+  const w=new FatSegments(segs.length/6,{color:0xb06bff, width:1.1, opacity:0.0, transparent:true,
+    segments:new Float32Array(segs)});
+  scene.add(w); return w;
+})();
 
 /* ---- observer + line of sight + transverse ring of test masses ---- */
 const OBS_R=12;                       // observer sits on a sphere of this radius
@@ -646,10 +699,8 @@ const obsBody=glowSprite(0xfff0d6, 1.7); observer.add(obsBody);
 const obsCore=new THREE.Mesh(new THREE.SphereGeometry(0.16,20,16),
   new THREE.MeshBasicMaterial({color:0xfff0d6})); observer.add(obsCore);
 
-const losMat=new THREE.LineDashedMaterial({color:0xfff0d6, transparent:true, opacity:0.45,
-  dashSize:0.5, gapSize:0.35});
-const losGeo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3(0,0,1)]);
-const los=new THREE.Line(losGeo, losMat); scene.add(los);
+const los=new FatLine(2,{color:0xfff0d6, width:1.4, opacity:0.5, dashed:true, dashSize:0.5, gapSize:0.35,
+  points:[new THREE.Vector3(),new THREE.Vector3(0,0,1)]}); scene.add(los);
 
 // test-mass ring: small spheres + deformed loop + reference loop, all in a group at the observer
 const RING_N=18, RING_SCALE=2.3;
@@ -663,15 +714,13 @@ for(let i=0;i<RING_N;i++){
   const b=i/RING_N*Math.PI*2; baseBeta.push(b);
   const m=new THREE.Mesh(massGeo, massMat); ringGroup.add(m); masses.push(m);
 }
-const refLoopGeo=new THREE.BufferGeometry();
-refLoopGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array((RING_N+1)*3),3));
-const refLoop=new THREE.LineLoop(refLoopGeo,
-  new THREE.LineBasicMaterial({color:0x5a6a86, transparent:true, opacity:0.5}));
+// loops are drawn through 6x as many points as there are masses, using the same exact
+// linear-order displacement field, so the deformed ring reads as the smooth ellipse it is
+const LOOP_N=RING_N*6;
+const refArr=new Float32Array(LOOP_N*3), defArr=new Float32Array(LOOP_N*3);
+const refLoop=new FatLine(LOOP_N,{color:0x5a6a86, width:1.2, opacity:0.55, loop:true});
 ringGroup.add(refLoop);
-const defLoopGeo=new THREE.BufferGeometry();
-defLoopGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array((RING_N)*3),3));
-const defLoop=new THREE.LineLoop(defLoopGeo,
-  new THREE.LineBasicMaterial({color:0xffe9c2, transparent:true, opacity:0.85}));
+const defLoop=new FatLine(LOOP_N,{color:0xffe9c2, width:2.0, opacity:0.9, loop:true});
 ringGroup.add(defLoop);
 // the transverse-plane polarization axes (faint) for orientation
 const polAxes=new THREE.Group(); ringGroup.add(polAxes);
@@ -785,8 +834,7 @@ function updateObserver(){
   const n=obsDir();
   observer.position.copy(n).multiplyScalar(OBS_R);
   // line of sight binary -> observer
-  losGeo.setFromPoints([new THREE.Vector3(0,0,0), observer.position.clone()]);
-  los.computeLineDistances();
+  los.setPoints([new THREE.Vector3(0,0,0), observer.position]);
   // place the ring just inside the observer, oriented in the transverse plane
   const ringPos=n.clone().multiplyScalar(OBS_R-2.4);
   ringGroup.position.copy(ringPos);
@@ -798,18 +846,16 @@ const _eb={e1:new THREE.Vector3(),e2:new THREE.Vector3()};
 function curBasis(){ const b=transverseBasis(obsDir()); _eb.e1.copy(b.e1); _eb.e2.copy(b.e2); return _eb; }
 // two persistent transverse-plane axis lines; rebuilt in place (no per-frame allocation)
 const _polAxisLines=[0,1].map(()=>{
-  const g=new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6),3));
-  const l=new THREE.Line(g, new THREE.LineBasicMaterial({color:0x5dd6ff,transparent:true,opacity:0.22}));
+  const l=new FatLine(2,{color:0x5dd6ff, width:1.1, opacity:0.3});
   polAxes.add(l); return l;
 });
+const _pa=new Float32Array(6);
 function buildPolAxes(){
   const {e1,e2}=curBasis(); const L=RING_SCALE*1.35;
   [[e1,_polAxisLines[0]],[e2,_polAxisLines[1]]].forEach(([dir,line])=>{
-    const a=line.geometry.attributes.position.array;
-    a[0]=-dir.x*L; a[1]=-dir.y*L; a[2]=-dir.z*L;
-    a[3]= dir.x*L; a[4]= dir.y*L; a[5]= dir.z*L;
-    line.geometry.attributes.position.needsUpdate=true;
+    _pa[0]=-dir.x*L; _pa[1]=-dir.y*L; _pa[2]=-dir.z*L;
+    _pa[3]= dir.x*L; _pa[4]= dir.y*L; _pa[5]= dir.z*L;
+    line.setPoints(_pa);
   });
 }
 
@@ -841,7 +887,8 @@ function layoutScene(){
    ANIMATION
    ============================================================ */
 let phiOrb=0;                 // accumulated orbital phase (rad)
-let ringAmpEnv=1;             // ringdown decay envelope, shared by the wave field AND the test ring
+let ringAmpEnv=1;             // ringdown decay envelope of the SOURCE (emitted now)
+let simT=0;                   // simulation clock: advances only while playing
 let last=performance.now();
 const KWAVE_REF = 2*Math.PI/4.5;   // base radial wavenumber (scene units) at ref rate
 const OM_REF = 0.30 + 1.5*0.873;   // visual orbital rate at the reference frequency (15 Hz)
@@ -849,10 +896,51 @@ const RING_DIST = OBS_R-2.4;       // the test ring's distance from the binary (
 // GW phase as seen AT the ring/observer: retarded by the visual travel time (K·r) and carrying
 // the m=2 azimuthal pattern (2·obsAzi) — so the ring pinches exactly when a crest of the rendered
 // wave field sweeps past it, and dragging the observer around the sky slides the phase with the arms.
-function obsPhase(){
-  const K = KWAVE_REF*(visOmega()/OM_REF);
-  return 2*phiOrb - 2*obsAzi - K*RING_DIST;
+// Rendered crests move outward at C_SCENE = 2Ω/K (the same for every frequency: λ = c/f_GW).
+const C_SCENE = 2*OM_REF/KWAVE_REF;               // scene units per second
+const HIST_T  = (FIELD_OUT+0.5)/C_SCENE;          // look-back needed at the rim of the field [s]
+// emission history: circular buffer of (τ, Φ_orb, dΦ/dτ, displacement amplitude, envelope)
+const HB=4096, hT=new Float64Array(HB), hP=new Float64Array(HB), hW=new Float64Array(HB),
+      hA=new Float32Array(HB), hE=new Float32Array(HB);
+let hHead=-1, hCount=0;
+function histPush(t, phi, w, a, e){
+  if(hCount && t<=hT[hHead]+1e-9){ hP[hHead]=phi; hW[hHead]=w; hA[hHead]=a; hE[hHead]=e; return; }  // paused: refresh
+  hHead=(hHead+1)%HB; hCount=Math.min(HB,hCount+1);
+  hT[hHead]=t; hP[hHead]=phi; hW[hHead]=w; hA[hHead]=a; hE[hHead]=e;
 }
+// state emitted at simulation time tq. Before the oldest record the binary is taken to have
+// been orbiting steadily (it has existed forever), extrapolating with the recorded rate.
+const _hr={phi:0, amp:0, env:1};
+function histAt(tq, out=_hr){
+  if(!hCount){ out.phi=phiOrb-visOmega()*(simT-tq); out.amp=2.2*Math.sqrt(visRel); out.env=1; return out; }
+  let j=hHead, n=0;
+  while(n<hCount-1 && hT[j]>tq){ j=(j-1+HB)%HB; n++; }
+  if(hT[j]>tq){ out.phi=hP[j]-hW[j]*(hT[j]-tq); out.amp=hA[j]; out.env=hE[j]; return out; }  // older than history
+  if(j===hHead){ out.phi=hP[j]; out.amp=hA[j]; out.env=hE[j]; return out; }
+  const k=(j+1)%HB, w=(tq-hT[j])/(hT[k]-hT[j]);
+  out.phi=hP[j]+(hP[k]-hP[j])*w; out.amp=hA[j]+(hA[k]-hA[j])*w; out.env=hE[j]+(hE[k]-hE[j])*w;
+  return out;
+}
+// resample the history onto HIST_N uniform look-back times for the GPU (one backward walk)
+function fillHistTex(){
+  let j=hHead, n=0;
+  for(let i=0;i<HIST_N;i++){
+    const tq=simT - i*HIST_T/(HIST_N-1);
+    while(n<hCount-1 && hT[j]>tq){ j=(j-1+HB)%HB; n++; }
+    let phi, a, e;
+    if(hT[j]>tq){ phi=hP[j]-hW[j]*(hT[j]-tq); a=hA[j]; e=hE[j]; }
+    else if(j===hHead){ phi=hP[j]; a=hA[j]; e=hE[j]; }
+    else { const k=(j+1)%HB, w=(tq-hT[j])/(hT[k]-hT[j]);
+      phi=hP[j]+(hP[k]-hP[j])*w; a=hA[j]+(hA[k]-hA[j])*w; e=hE[j]+(hE[k]-hE[j])*w; }
+    histData[4*i]=phi-phiOrb; histData[4*i+1]=a; histData[4*i+2]=e;
+  }
+  histTex.needsUpdate=true;
+}
+// GW phase AT the test ring: the quadrupole phase emitted a light-travel time RING_DIST/c ago,
+// carrying the m=2 azimuthal pattern (2·obsAzi) — so the ring pinches exactly when a crest of the
+// rendered field sweeps past it, during the chirp and ringdown as well as in steady state.
+function obsPhase(){ return 2*histAt(simT-RING_DIST/C_SCENE).phi - 2*obsAzi; }
+function obsEnv(){ return histAt(simT-RING_DIST/C_SCENE).env; }
 
 /* ---- coalescence state machine (drives the inspiral tour) ---- */
 const INSP_DUR=9.0, MERGE_DUR=0.7, RING_DUR=3.4;     // visual seconds for each phase
@@ -879,13 +967,8 @@ function animate(){
   const now=performance.now(); let dt=(now-last)/1000; last=now;
   dt=Math.min(dt,0.05);
 
-  // camera tween
-  if(camTween){ camTween.e=Math.min(1,camTween.e+dt/camTween.dur);
-    const k=1-Math.pow(1-camTween.e,3);
-    camera.position.lerpVectors(camTween.p0,camTween.p1,k);
-    controls.target.lerpVectors(camTween.t0,camTween.t1,k);
-    if(camTween.e>=1) camTween=null;
-  }
+  // camera flight
+  flight.update(dt);
   // slider tweens
   if(_stween.size){
     for(const [el,t] of _stween){ t.e=Math.min(1,t.e+dt/t.dur);
@@ -920,10 +1003,8 @@ function animate(){
   const sep=visSep();
   // keep the radiation streaming outward through merger and ringdown — the remnant is still
   // ringing at the (high) QNM frequency, so the wave does not stop until the wobble has died.
-  if(S.playing){
-    const rate = orbiting ? 1 : (S.phase==='merger' ? 4 : 2.6);
-    phiOrb += om*dt*rate;
-  }
+  const rate = orbiting ? 1 : (S.phase==='merger' ? 4 : 2.6);
+  if(S.playing){ phiOrb += om*dt*rate; simT += dt; }
 
   if(orbiting){
     bh1.visible=bh2.visible=true; remnant.visible=false;
@@ -953,21 +1034,19 @@ function animate(){
   }
 
   // the ringdown radiation IS the quasi-normal mode: its amplitude decays with the same
-  // e^{−t/τ} envelope as the remnant's wobble, so wave field AND test ring die out together.
+  // e^{−t/τ} envelope as the remnant's wobble. This is what the source emits NOW; the field
+  // and the test ring see it only after the light-travel time.
   ringAmpEnv = (S.inspiral && S.phase==='ringdown') ? Math.exp(-(S.evt/RING_DUR)*3.0) : 1;
+  // corrugation height tracks the strain law (compressed for the view)
+  histPush(simT, phiOrb, om*rate, 2.2*Math.sqrt(visRel)*ringAmpEnv, ringAmpEnv);
 
-  // update equatorial wave field: H = amp · falloff · cos(2φ − 2Φ_orb + K·r)
+  // equatorial wave field: everything is evaluated per vertex on the GPU at t − r/c
+  const fu=fieldMat.uniforms;
+  fu.uGain.value += ((S.showField?1:0) - fu.uGain.value)*0.1;
   if(S.showField){
-    const pos=fieldGeo.attributes.position.array;
-    const K = KWAVE_REF * (om/OM_REF);          // tighter arms at higher frequency, same outward speed
-    const amp = 2.2*Math.sqrt(visRel)*ringAmpEnv;  // corrugation height tracks the strain law (compressed for the view)
-    for(let k=0,vi=0; k<fieldR.length; k++,vi+=3){
-      const r=fieldR[k], ph=fieldPhi[k];
-      const fall = (4.0/(r+1)) * Math.min(1,(r-FIELD_IN)/2.0);   // amplitude falloff + smooth inner ramp
-      pos[vi+1] = amp*fall*Math.cos(2*ph - 2*phiOrb + K*r);
-    }
-    fieldGeo.attributes.position.needsUpdate=true;
-    fieldMat.opacity += (0.6*ringAmpEnv - fieldMat.opacity)*0.1;   // fades away as the remnant rings down
+    fillHistTex();
+    fu.uPhi.value = phiOrb % Math.PI;          // cos(2φ − 2Φ) has period π in Φ
+    fu.uC.value = C_SCENE; fu.uHistT.value = HIST_T;
   }
 
   // lobe fade
@@ -979,7 +1058,7 @@ function animate(){
   if(S.showRing){ deformRing(); }
 
   controls.update();
-  composer.render();
+  pipeline.render();
   drawPlot();
 }
 
@@ -989,28 +1068,24 @@ function deformRing(){
   // instantaneous (exaggerated) strains seen at this inclination, at the RETARDED phase —
   // the ring responds when a crest actually arrives, not when the binary emits it
   const phaseGW=obsPhase();
-  const big=S.exag*ringAmpEnv;
+  const big=S.exag*obsEnv();
   const plusShape=(1+S.ci*S.ci)/2, crossShape=S.ci;
   let hp=big*plusShape*Math.cos(phaseGW), hc=big*crossShape*Math.sin(phaseGW);
   if(S.iso==='plus')  hc=0;
   if(S.iso==='cross') hp=0;
-  const defArr=defLoopGeo.attributes.position.array;
-  const refArr=refLoopGeo.attributes.position.array;
-  for(let i=0;i<RING_N;i++){
-    const b=baseBeta[i], X=Math.cos(b), Y=Math.sin(b);
+  for(let i=0;i<LOOP_N;i++){
+    const b=i/LOOP_N*Math.PI*2, X=Math.cos(b), Y=Math.sin(b);
     const Xp=X + 0.5*(hp*X + hc*Y);
     const Yp=Y + 0.5*(hc*X - hp*Y);
     _wp.copy(e1).multiplyScalar(Xp*RING_SCALE).addScaledVector(e2, Yp*RING_SCALE);
-    masses[i].position.copy(_wp);
+    if(i%6===0) masses[i/6].position.copy(_wp);
     defArr[i*3]=_wp.x; defArr[i*3+1]=_wp.y; defArr[i*3+2]=_wp.z;
     // reference (undeformed) circle
     _wp.copy(e1).multiplyScalar(X*RING_SCALE).addScaledVector(e2, Y*RING_SCALE);
     refArr[i*3]=_wp.x; refArr[i*3+1]=_wp.y; refArr[i*3+2]=_wp.z;
   }
-  // close the reference loop
-  refArr[RING_N*3]=refArr[0]; refArr[RING_N*3+1]=refArr[1]; refArr[RING_N*3+2]=refArr[2];
-  defLoopGeo.attributes.position.needsUpdate=true;
-  refLoopGeo.attributes.position.needsUpdate=true;
+  defLoop.setPoints(defArr);
+  refLoop.setPoints(refArr);
 }
 
 /* ---- the waveform plot: real labeled axes (time on x, strain h on y) ---- */
@@ -1202,7 +1277,7 @@ $('wStart').addEventListener('click', ()=>{ dismissWelcome(); $('psWave').click(
    ============================================================ */
 function onResize(){
   const w=innerWidth, h=innerHeight;
-  renderer.setSize(w,h); composer.setSize(w,h);
+  pipeline.setSize(w,h);
   camera.aspect=w/h; camera.updateProjectionMatrix();
   sizePlot();
 }

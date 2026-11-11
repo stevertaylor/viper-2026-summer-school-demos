@@ -256,13 +256,18 @@
         <button id="selB">Move B</button>
       </div>
       <div class="readout" id="geom"></div>
+      <div class="readout"><b style="color:var(--pa)">A</b> and <b style="color:var(--pb)">B</b> are
+        test pulsars you place by hand. The faint markers are the <b>68 millisecond pulsars of the
+        NANOGrav 15-yr data set</b> at their true sky positions — note how they crowd toward the
+        inner Galaxy. Every pair among them is a grey point in the correlation plot. Stars,
+        grid and Earth's spin axis are the real J2000 sky.</div>
     </div>
 
     <div class="group">
       <h2>Observation</h2>
       <div class="btns">
         <button id="playBtn" class="active">⏸ Evolving</button>
-        <button id="arrBtn" class="active">Array on</button>
+        <button id="arrBtn" class="active">NG15 array on</button>
       </div>
       <div class="readout">“Evolving” animates the residual wiggles (one observing epoch
         after another). The plotted correlation is the <b>long-baseline average</b>, so its
@@ -286,6 +291,7 @@
     <button id="immBtn" title="Hide panels (cinematic view)">⤢</button>
     <div class="skylab" id="labA" style="color:var(--pa)">A</div>
     <div class="skylab" id="labB" style="color:var(--pb)">B</div>
+    <div class="skylab" id="labP" style="color:#d6e2f5;font-weight:500;opacity:0"></div>
     <div class="hint">🖱 Drag empty space to <b>orbit</b> · scroll to <b>zoom</b> · drag pulsar
       <b style="color:var(--pa)">A</b>/<b style="color:var(--pb)">B</b> to change their
       separation · drag any <b style="color:var(--source)">source</b> to move it on the sky ·
@@ -327,13 +333,13 @@
     <div class="legend">
       <span><i style="background:var(--hd)"></i>Hellings &amp; Downs</span>
       <span><i style="background:var(--accent)"></i>measured ORF</span>
-      <span><i style="background:var(--cloud)"></i>pulsar pairs</span>
+      <span><i style="background:var(--cloud)"></i>NG15 pulsar pairs</span>
     </div>
     <canvas id="hd"></canvas>
   </div>
 
   <div class="panel" id="mollPanel">
-    <div class="plottitle">Antenna overlap · all-sky <span class="pill">Mollweide</span></div>
+    <div class="plottitle">Antenna overlap · all-sky <span class="pill">Mollweide · RA/Dec</span></div>
     <canvas id="moll"></canvas>
   </div>
 </div>
@@ -347,9 +353,8 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { createPipeline, FatLine, FatSegments, CameraFlight, respectReducedMotion } from '../shared/gfx.js';
+import { createSky, NANOGRAV_15YR } from '../shared/sky.js';
 
 /* ============================================================= *
  *  PHYSICS  — cross-correlation of pulsar timing residuals
@@ -392,12 +397,11 @@ const OMEGA = FREQ.map(f=>2*Math.PI*f);
 const NMAX = 1000;
 const TS = 260;                                // time samples shown
 
-// ---- pulsars: A, B (focus) + a fixed background array ----
-const NARR = 16;                               // background array pulsars
-function fib(i,n){ // fibonacci sphere direction
-  const k=i+0.5, phi=Math.acos(1-2*k/n), th=Math.PI*(1+Math.sqrt(5))*k;
-  return new THREE.Vector3(Math.sin(phi)*Math.cos(th),Math.cos(phi),Math.sin(phi)*Math.sin(th));
-}
+// ---- pulsars: A, B (draggable test pulsars) + the real NANOGrav 15-yr array ----
+// The array is the 68 millisecond pulsars of the NANOGrav 15-yr data set at their true
+// J2000 sky positions (shared/sky/ng15.js). Their directions are set from RA/Dec once the
+// sky frame exists (setArrayDirections), so they register with the real star field.
+const NARR = NANOGRAV_15YR.length;
 const pulsars = [];   // {dir:Vector3, isFocus, Fp:Float32Array(NMAX), Fc:Float32Array(NMAX), Cre,Cim, mesh, los}
 function makePulsar(dir,isFocus){
   return { dir:dir.clone().normalize(), isFocus,
@@ -409,7 +413,12 @@ function makePulsar(dir,isFocus){
 pulsars.push(makePulsar(new THREE.Vector3(0,0.30,1), true));   // A
 pulsars.push(makePulsar(new THREE.Vector3(0.85,0.30,0.55), true)); // B
 const A = pulsars[0], B = pulsars[1];
-for(let i=0;i<NARR;i++) pulsars.push(makePulsar(fib(i,NARR), false));
+for(let i=0;i<NARR;i++){ const p=makePulsar(new THREE.Vector3(0,1,0), false);
+  p.name=NANOGRAV_15YR[i].name; pulsars.push(p); }
+// Only A and B have their residual time series drawn, so only they need the (costly)
+// per-mode Fourier coefficients. The correlations themselves are the phase-independent
+// long-baseline averages, which need only each pulsar's antenna responses Fp, Fc.
+const FOCUS = [A, B];
 
 // ---- source bank (sky directions + per-mode random Earth-term phases/amps) ----
 const src = {
@@ -491,7 +500,7 @@ function responseForSource(j){
 
 // pulsar term: independent equal-power complex coeff per pulsar per mode
 function rebuildPulsarTerm(){
-  for(const p of pulsars){
+  for(const p of FOCUS){
     for(let k=0;k<K;k++){ p.Cpre[k]=0; p.Cpim[k]=0; }
     if(!pulsarTerm || N===0) continue;
     for(let j=0;j<N;j++){
@@ -509,7 +518,7 @@ function rebuildPulsarTerm(){
 // Earth-term coefficients (depend on drifting phases) + add pulsar term
 let phaseDrift=0;
 function rebuildCoeffs(){
-  for(const p of pulsars){
+  for(const p of FOCUS){
     const Cre=p.Cre, Cim=p.Cim;
     for(let k=0;k<K;k++){ Cre[k]=p.Cpre[k]; Cim[k]=p.Cpim[k]; }
     for(let j=0;j<N;j++){
@@ -560,8 +569,8 @@ const orfCurve = new Float64Array(ORFN);
 const orfScratch = { dir:new THREE.Vector3(), Fp:new Float32Array(NMAX), Fc:new Float32Array(NMAX) };
 // the empirical ORF curve and the Mollweide map both depend only on the source sky
 // + pulsar directions — mark both stale on any genuine geometry/source change.
-let orfDirty = true, mollDirty = true;
-function markSkyDirty(){ orfDirty=true; mollDirty=true; }
+let orfDirty = true, mollDirty = true, cloudDirty = true;
+function markSkyDirty(){ orfDirty=true; mollDirty=true; cloudDirty=true; }
 function computeORF(){
   let axis=A.dir.clone().cross(B.dir);
   if(axis.lengthSq()<1e-6){ axis=new THREE.Vector3(0,1,0).cross(A.dir);
@@ -578,28 +587,28 @@ function computeORF(){
   orfDirty=false;
 }
 
-buildSourceBank();
-rebuildAllResponses();
-rebuildCoeffs();
-
 /* ============================================================= *
  *  THREE.js SCENE
  * ============================================================= */
 const sceneEl=document.getElementById('scene');
-const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+// opaque, antialias:false — the pipeline draws the scene into a 4x MSAA HDR target and does
+// tone mapping + sRGB itself (before this, the bloom pass wrote LINEAR values to screen).
+const renderer=new THREE.WebGLRenderer({antialias:false,powerPreference:'high-performance'});
 renderer.outputColorSpace=THREE.SRGBColorSpace;
 renderer.toneMapping=THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure=1.05;
 sceneEl.appendChild(renderer.domElement);
 
 const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x04060c);     // = --bg
 const camera=new THREE.PerspectiveCamera(46,1,0.1,400);
 camera.position.set(0,2.4,6.4);
 const controls=new OrbitControls(camera,renderer.domElement);
 controls.enableDamping=true; controls.dampingFactor=0.07;
 controls.minDistance=3.2; controls.maxDistance=14; controls.enablePan=false;
 controls.autoRotateSpeed=0.5;
+respectReducedMotion(controls);
+const flight=new CameraFlight(camera,controls);
 
 scene.add(new THREE.AmbientLight(0x35405a,1.0));
 const sun=new THREE.DirectionalLight(0xfff4e2,2.0); sun.position.set(5,3,4); scene.add(sun);
@@ -609,16 +618,18 @@ const key=new THREE.PointLight(0x9fd8ff,0.5,30); key.position.set(0,0,0); scene.
 const SKY=3.0;   // celestial-sphere radius (sources)
 const PR=2.0;    // pulsar shell radius
 
-// starfield
-(function(){
-  const n=1400, pos=new Float32Array(n*3);
-  for(let i=0;i<n;i++){
-    const r=40+Math.random()*120, u=Math.random()*2-1, t=Math.random()*2*Math.PI, s=Math.sqrt(1-u*u);
-    pos[i*3]=r*s*Math.cos(t); pos[i*3+1]=r*u; pos[i*3+2]=r*s*Math.sin(t);
-  }
-  const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(pos,3));
-  scene.add(new THREE.Points(g,new THREE.PointsMaterial({color:0x9fb4d6,size:0.55,sizeAttenuation:false,transparent:true,opacity:0.7})));
-})();
+// The real sky in the ECLIPTIC frame (scene +Y = ecliptic north pole), so the Earth below,
+// tilted by the obliquity, points its spin axis at the real north celestial pole.
+const sky=createSky(scene,{frame:'ecliptic', renderer, mwGain:0.5, starGain:0.55});
+// sky frame <-> scene: rotation of the sky group (equatorial object space -> scene)
+const EQ2SC=new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(sky.group.quaternion));
+function setArrayDirections(){
+  pulsars.forEach(p=>{ if(!p.isFocus){ const r=NANOGRAV_15YR.find(q=>q.name===p.name); sky.dir(r.ra,r.dec,p.dir); } });
+}
+setArrayDirections();
+buildSourceBank();
+rebuildAllResponses();
+rebuildCoeffs();
 
 // Earth (the observer) — procedural day map + clouds + atmosphere limb glow
 const ER=0.30;
@@ -667,30 +678,50 @@ function makeCloudTexture(){
     x.fillStyle=g; x.beginPath(); x.arc(cx,cy,r,0,7); x.fill(); }
   const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace; return t;
 }
+// Earth sits in a tilt group whose +Y is the north celestial pole; the child spins about its
+// own Y. (Previously rotation.z=0.41 then rotation.y+=… — Euler XYZ is Rx·Ry·Rz, so that
+// PRECESSED the tilted axis around world Y instead of rotating the planet.)
 const earthGroup=new THREE.Group(); scene.add(earthGroup);
+earthGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), sky.pole);
 const earth=new THREE.Mesh(new THREE.SphereGeometry(ER,48,48),
   new THREE.MeshStandardMaterial({map:makeEarthTexture(),emissive:0x0a1830,emissiveIntensity:0.35,
     roughness:0.85,metalness:0.0}));
-earth.rotation.z=0.41; earthGroup.add(earth);
+earthGroup.add(earth);
 const clouds=new THREE.Mesh(new THREE.SphereGeometry(ER*1.012,48,48),
   new THREE.MeshStandardMaterial({map:makeCloudTexture(),transparent:true,opacity:0.55,
     depthWrite:false,roughness:1}));
-clouds.rotation.z=0.41; earthGroup.add(clouds);
+earthGroup.add(clouds);
 const atmMat=new THREE.ShaderMaterial({
-  uniforms:{glowColor:{value:new THREE.Color(0x5aa6ff)},p:{value:3.2},s:{value:1.05}},
+  uniforms:{glowColor:{value:new THREE.Color(0x5aa6ff)},p:{value:1.6},s:{value:1.5}},
   vertexShader:`varying vec3 vN; varying vec3 vV;
     void main(){ vec4 mv=modelViewMatrix*vec4(position,1.0); vN=normalize(normalMatrix*normal);
       vV=normalize(-mv.xyz); gl_Position=projectionMatrix*mv; }`,
   fragmentShader:`varying vec3 vN; varying vec3 vV; uniform vec3 glowColor; uniform float p; uniform float s;
-    void main(){ float rim=pow(1.0-max(dot(vN,vV),0.0),p); gl_FragColor=vec4(glowColor, rim*s); }`,
-  side:THREE.BackSide,blending:THREE.AdditiveBlending,transparent:true,depthWrite:false});
+    // Back faces of the shell only (those behind the opaque Earth are depth-culled). For an
+    // optically thin uniform shell the line-of-sight column at impact parameter b is
+    // 2*sqrt(R^2-b^2) = 2R|n.v|: brightest at the planet's limb, zero at the shell edge; p>1
+    // mimics the falloff with altitude. (The old 1-max(n.v,0) was identically 1 on back faces: a
+    // flat annulus.) clamp() keeps pow() off negative bases: under MSAA, extrapolated varyings
+    // at partially covered pixels gave NaN, which the bloom smeared into black blocks.
+    void main(){ float col=pow(clamp(-dot(vN,vV),0.0,1.0),p);
+      gl_FragColor=vec4(glowColor*min(col*s,4.0), 1.0); }`,
+  side:THREE.BackSide,blending:THREE.CustomBlending,blendSrc:THREE.OneFactor,blendDst:THREE.OneFactor,
+  transparent:true,depthWrite:false});   // additive in colour
 const atmosphere=new THREE.Mesh(new THREE.SphereGeometry(ER*1.28,48,48),atmMat);
 scene.add(atmosphere);
 
-// celestial sphere wireframe
-const cs=new THREE.Mesh(new THREE.SphereGeometry(SKY,28,18),
-  new THREE.MeshBasicMaterial({color:0x223049,wireframe:true,transparent:true,opacity:0.18}));
-scene.add(cs);
+// celestial sphere: the real equatorial graticule (Dec every 30 deg, RA every 2 h), built in
+// the sky's equatorial object space and carried by the same rotation as the stars
+const cs=new THREE.Group(); cs.quaternion.copy(sky.group.quaternion); cs.scale.setScalar(SKY); scene.add(cs);
+(()=>{ const segs=[], eq=(ra,de)=>[Math.cos(de)*Math.cos(ra),Math.cos(de)*Math.sin(ra),Math.sin(de)];
+  const push=(a,b)=>segs.push(...a,...b), D=Math.PI/180;
+  for(const de of [-60,-30,30,60]) for(let i=0;i<96;i++) push(eq(i/96*2*Math.PI,de*D),eq((i+1)/96*2*Math.PI,de*D));
+  for(let h=0;h<12;h++) for(let i=0;i<48;i++){ const ra=h*Math.PI/6;
+    push(eq(ra,(-90+180*i/48)*D),eq(ra,(-90+180*(i+1)/48)*D)); }
+  cs.add(new FatSegments(segs.length/6,{color:0x3a4c70,width:1,opacity:0.30,segments:segs}));
+  const eqPts=[]; for(let i=0;i<128;i++) eqPts.push(...eq(i/128*2*Math.PI,0));
+  cs.add(new FatLine(128,{color:0x5a6f96,width:1.2,opacity:0.40,loop:true,points:eqPts}));   // celestial equator
+})();
 
 // antenna-overlap kernel shell: F+_A F+_B + Fx_A Fx_B over the whole sky, computed
 // per-fragment from the two pulsar directions. This is the integrand that, weighted
@@ -753,20 +784,21 @@ scene.add(srcPts);
 const COLP=[0xffd166,0x6ee0ff];
 function buildPulsarMesh(p,col,isF){
   const grp=new THREE.Group(); scene.add(grp); p.mesh=grp; grp.userData.pul=p;
-  const R = isF?0.075:0.045;            // neutron-star radius
+  const R = isF?0.075:0.032;            // neutron-star radius (array markers kept small)
   const spin=new THREE.Group(); grp.add(spin); p.spin=spin;   // spins about local y
+  const seg = isF?36:16;                // the 68 array markers stay light
 
   // neutron-star body: hot, faintly metallic
-  const body=new THREE.Mesh(new THREE.SphereGeometry(R,36,36),
-    new THREE.MeshStandardMaterial({color:0xcfe0ff,emissive:col,emissiveIntensity:isF?1.2:0.9,
+  const body=new THREE.Mesh(new THREE.SphereGeometry(R,seg,Math.round(seg*0.75)),
+    new THREE.MeshStandardMaterial({color:isF?0xcfe0ff:0x8090a8,emissive:col,emissiveIntensity:isF?1.2:0.55,
       roughness:0.3,metalness:0.5}));
   spin.add(body);
   // soft glow halo
-  spin.add(new THREE.Mesh(new THREE.SphereGeometry(R*1.7,24,24),
-    new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:isF?0.16:0.12,
+  spin.add(new THREE.Mesh(new THREE.SphereGeometry(R*1.7,isF?24:12,isF?24:10),
+    new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:isF?0.16:0.07,
       side:THREE.BackSide,depthWrite:false,blending:THREE.AdditiveBlending})));
   // generous invisible hit target for easy grabbing
-  if(isF) grp.add(new THREE.Mesh(new THREE.SphereGeometry(0.22,8,8),
+  grp.add(new THREE.Mesh(new THREE.SphereGeometry(isF?0.22:0.10,8,8),
     new THREE.MeshBasicMaterial({visible:false})));
 
   // full magnetosphere (beams, caps, field lines) on the two focus pulsars only —
@@ -783,7 +815,7 @@ function buildPulsarMesh(p,col,isF){
         void main(){ vA=clamp(position.y/H+0.5,0.0,1.0);
           gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
       fragmentShader:`varying float vA; uniform vec3 col; uniform float gain;
-        void main(){ gl_FragColor=vec4(col, pow(vA,2.0)*gain); }`
+        void main(){ float a=clamp(vA,0.0,1.0); gl_FragColor=vec4(col, a*a*gain); }`   // no pow(neg) under MSAA
     });
     const beamGeo=new THREE.ConeGeometry(BEAM_R,BEAM_H,28,1,true);
     const beamA=new THREE.Mesh(beamGeo,beamMat); beamA.rotation.x=Math.PI; beamA.position.y= BEAM_H/2;
@@ -796,7 +828,6 @@ function buildPulsarMesh(p,col,isF){
     const capB=capA.clone(); capB.position.y=-R*0.95; mag.add(capB);
 
     // dipole field lines  r(θ)=Lmax·sin²θ  (meridional loops, several azimuths)
-    const fieldMat=new THREE.LineBasicMaterial({color:col,transparent:true,opacity:0.30});
     const Lmax=R*5.0;
     for(let j=0;j<6;j++){
       const phi=j*Math.PI/3, pts=[];
@@ -805,32 +836,33 @@ function buildPulsarMesh(p,col,isF){
         const xr=r*Math.sin(th), yy=r*Math.cos(th);
         pts.push(new THREE.Vector3(xr*Math.cos(phi),yy,xr*Math.sin(phi)));
       }
-      mag.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),fieldMat));
+      mag.add(new FatLine(pts.length,{color:col,width:1.1,opacity:0.34,points:pts}));
     }
   }
 
-  const lg=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]);
-  const ll=new THREE.Line(lg,new THREE.LineBasicMaterial({color:col,transparent:true,opacity:isF?0.5:0.16}));
-  scene.add(ll); p.los=ll;
+  if(isF){ p.los=new FatLine(2,{color:col,width:1.5,opacity:0.5}); scene.add(p.los); }
 }
 pulsars.forEach((p,i)=>{ buildPulsarMesh(p, p.isFocus?COLP[i]:0x9fb6d8, p.isFocus); });
+// the 68 array lines of sight never move: one fat-segment batch, one draw call
+const arrayLos=new FatSegments(NARR,{color:0x9fb6d8,width:1,opacity:0.16,
+  segments:pulsars.filter(p=>!p.isFocus).flatMap(p=>[0,0,0,p.dir.x*PR,p.dir.y*PR,p.dir.z*PR])});
+scene.add(arrayLos);
+const _pp=new THREE.Vector3(), _o=new THREE.Vector3();
 function placePulsars(){
   for(const p of pulsars){
-    const pos=p.dir.clone().multiplyScalar(PR);
-    p.mesh.position.copy(pos);
-    const a=p.los.geometry.attributes.position;
-    a.setXYZ(0,0,0,0); a.setXYZ(1,pos.x,pos.y,pos.z); a.needsUpdate=true;
+    p.mesh.position.copy(p.dir).multiplyScalar(PR);
     p.mesh.visible = p.isFocus || showArray;
-    p.los.visible  = p.isFocus || showArray;
+    if(p.isFocus){ _pp.copy(p.dir).multiplyScalar(PR); p.los.setPoints([_o,_pp]); }
   }
+  arrayLos.visible = showArray;
 }
 
 // great-circle separation arc between A and B
-const arcGeo=new THREE.BufferGeometry();
-const arc=new THREE.Line(arcGeo,new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.45}));
+const ARC_STEPS=48;
+const arc=new FatLine(ARC_STEPS+1,{color:0xffffff,width:1.6,opacity:0.5});
 scene.add(arc);
 function updateArc(){
-  const a=A.dir, b=B.dir, steps=48, pts=[];
+  const a=A.dir, b=B.dir, steps=ARC_STEPS, pts=[];
   const ang=sepAngle(A,B);
   if(ang<1e-3){ arc.visible=false; return; }
   arc.visible=true;
@@ -839,18 +871,15 @@ function updateArc(){
     const q=new THREE.Quaternion().setFromAxisAngle(axis,ang*i/steps);
     pts.push(a.clone().applyQuaternion(q).multiplyScalar(PR*1.04));
   }
-  arcGeo.setFromPoints(pts);
+  arc.setPoints(pts);
 }
 
-// bloom
-const composer=new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene,camera));
-const bloom=new UnrealBloomPass(new THREE.Vector2(1,1),0.7,0.6,0.82);
-composer.addPass(bloom);
+// MSAA HDR scene -> bloom -> tone map / sRGB / lens vignette / dither
+const pipeline=createPipeline({renderer,scene,camera,bloom:[0.7,0.6,0.82]});
 
 function resize(){
   const w=sceneEl.clientWidth,h=sceneEl.clientHeight;
-  renderer.setSize(w,h); composer.setSize(w,h);
+  pipeline.setSize(w,h);
   camera.aspect=w/h; camera.updateProjectionMatrix();
   mollDirty=true;
 }
@@ -900,6 +929,7 @@ function drawMollweide(){
   const img=moX.createImageData(moCv.width,moCv.height);
   const W=img.width,H=img.height, A2=a*d,B2=b*d,CX=cx*d,CY=cy*d;
   const dark=[16,21,32];
+  const E=EQ2SC.elements;                       // column-major: scene = E · equatorial
   for(let py=0;py<H;py++){
     const ny=-(py-CY)/B2; if(ny<-1||ny>1) continue;
     const th=Math.asin(ny), lat=Math.asin(Math.max(-1,Math.min(1,(2*th+Math.sin(2*th))/Math.PI)));
@@ -907,8 +937,9 @@ function drawMollweide(){
     for(let px=0;px<W;px++){
       const nx=(px-CX)/A2; if(nx*nx+ny*ny>1) continue;
       const lon=Math.PI*nx/(ct||1e-6); if(lon<-Math.PI||lon>Math.PI) continue;
-      const cphi=Math.cos(lat);
-      const k=kernelAt(cphi*Math.cos(lon),cphi*Math.sin(lon),Math.sin(lat));
+      // equatorial map: lat = Dec, and RA = −lon (RA increases to the LEFT, as on the sky)
+      const cphi=Math.cos(lat), ex=cphi*Math.cos(-lon), ey=cphi*Math.sin(-lon), ez=Math.sin(lat);
+      const k=kernelAt(E[0]*ex+E[3]*ey+E[6]*ez, E[1]*ex+E[4]*ey+E[7]*ez, E[2]*ex+E[5]*ey+E[8]*ez);
       const mag=Math.min(1,Math.abs(k)*1.3);
       const col = k>=0 ? [255,140,56] : [82,158,255];
       const o=(py*W+px)*4;
@@ -925,8 +956,15 @@ function drawMollweide(){
   moX.strokeStyle='rgba(255,255,255,.10)';
   moX.beginPath(); moX.moveTo(cx,cy-b); moX.lineTo(cx,cy+b);
   moX.moveTo(cx-a,cy); moX.lineTo(cx+a,cy); moX.stroke();
-  const toXY=(dir)=>{ const lon=Math.atan2(dir.y,dir.x), lat=Math.asin(Math.max(-1,Math.min(1,dir.z)));
+  // scene direction -> equatorial (transpose of EQ2SC) -> (RA, Dec) -> map, RA increasing left
+  const toXY=(dir)=>{ const E=EQ2SC.elements;
+    const ex=E[0]*dir.x+E[1]*dir.y+E[2]*dir.z, ey=E[3]*dir.x+E[4]*dir.y+E[5]*dir.z, ez=E[6]*dir.x+E[7]*dir.y+E[8]*dir.z;
+    const lon=-Math.atan2(ey,ex), lat=Math.asin(Math.max(-1,Math.min(1,ez)));
     const [u,v]=mollFwd(lon,lat); return [cx+u*a, cy-v*b]; };
+  // the NANOGrav 15-yr array (real positions)
+  if(showArray){ moX.fillStyle='rgba(205,220,245,.9)';
+    for(const p of pulsars){ if(p.isFocus) continue; const [X,Y]=toXY(p.dir);
+      moX.beginPath(); moX.arc(X,Y,1.5,0,7); moX.fill(); } }
   // sources (sky dir = −Ω̂)
   moX.fillStyle='rgba(255,107,157,.85)';
   for(let j=0;j<N;j++){ const o=src.dir[j];
@@ -939,7 +977,37 @@ function drawMollweide(){
     moX.fillStyle='#0a0e16'; moX.font='700 8px -apple-system,sans-serif'; moX.textAlign='center';
     moX.fillText(lab,X,Y+3);
   });
+  // RA labels along the equator (drawn last): 0h at centre, RA increasing to the LEFT
+  moX.font='600 8px -apple-system,sans-serif'; moX.textAlign='center';
+  moX.shadowColor='rgba(0,0,0,.9)'; moX.shadowBlur=3; moX.fillStyle='rgba(215,226,244,.75)';
+  [[0,'0h'],[90,'6h'],[180,'12h'],[270,'18h']].forEach(([ra,lab])=>{
+    const l=-((ra+180)%360-180)*Math.PI/180; const [u]=mollFwd(l,0);
+    moX.fillText(lab, cx+u*a*(ra===180?0.94:1), cy-4); });
+  moX.shadowBlur=0;
   mollDirty=false;
+}
+
+// ---- pair cloud cache ----
+const NPAIR=pulsars.length*(pulsars.length-1)/2;
+const cloudG=new Float32Array(NPAIR), cloudV=new Float32Array(NPAIR), autoP=new Float64Array(pulsars.length);
+let cloudN=0, cloudT=0, cloudKey='';
+const cloudCv=document.createElement('canvas');
+function computeCloud(){
+  // per-pulsar long-baseline auto power, then only the cross term per pair (same as correlationAvg)
+  const f=pulsarTerm?2:1;
+  for(let i=0;i<pulsars.length;i++){ const a=pulsars[i]; let s=0;
+    for(let j=0;j<N;j++) s+=a.Fp[j]*a.Fp[j]*src.Wp[j]+a.Fc[j]*a.Fc[j]*src.Wc[j];
+    autoP[i]=f*s; }
+  cloudN=0;
+  for(let i=0;i<pulsars.length;i++) for(let j=i+1;j<pulsars.length;j++){
+    const a=pulsars[i], b=pulsars[j];
+    if(a.isFocus&&b.isFocus) continue;            // focus pair drawn separately
+    let num=0; const Fpa=a.Fp, Fca=a.Fc, Fpb=b.Fp, Fcb=b.Fc;
+    for(let k=0;k<N;k++) num+=Fpa[k]*Fpb[k]*src.Wp[k]+Fca[k]*Fcb[k]*src.Wc[k];
+    const d=Math.sqrt(autoP[i]*autoP[j]);
+    cloudG[cloudN]=sepAngle(a,b)*180/Math.PI; cloudV[cloudN]=d>1e-12?num/d:0; cloudN++;
+  }
+  cloudDirty=false; cloudT=performance.now();
 }
 
 let tsScale=1;
@@ -999,15 +1067,21 @@ function drawHD(){
   hdX.strokeStyle='#9b8cff'; hdX.lineWidth=2.2; hdX.beginPath();
   for(let g=0;g<=180;g++){ const v=hdCurve(g*Math.PI/180), x=X(g), y=Y(v); g?hdX.lineTo(x,y):hdX.moveTo(x,y); }
   hdX.stroke();
-  // array pair cloud
+  // array pair cloud (NG15: 2278 array pairs + 136 pairs with A or B), cached: it only
+  // changes when the source sky, N, the pulsar term or A/B change
+  // Rasterising ~2400 circles every frame is costly, so the cloud lives in its own bitmap,
+  // repainted only when the pairs or the panel size change.
   if(showArray && N>0){
-    hdX.fillStyle='rgba(127,147,180,.55)';
-    for(let i=0;i<pulsars.length;i++) for(let j=i+1;j<pulsars.length;j++){
-      const a=pulsars[i],b=pulsars[j];
-      if(a.isFocus&&b.isFocus) continue; // focus pair drawn separately
-      const g=sepAngle(a,b)*180/Math.PI, v=correlationAvg(a,b);
-      hdX.beginPath(); hdX.arc(X(g),Y(Math.max(yMin,Math.min(yMax,v))),1.7,0,7); hdX.fill();
-    }
+    if(cloudDirty && (!nTween || performance.now()-cloudT>120)) computeCloud();
+    const key=cloudT+':'+w+'x'+h+':'+d;
+    if(cloudKey!==key){ cloudKey=key;
+      cloudCv.width=hdCv.width; cloudCv.height=hdCv.height;
+      const cx=cloudCv.getContext('2d'); cx.setTransform(d,0,0,d,0,0);
+      cx.fillStyle='rgba(140,160,195,.42)'; cx.beginPath();
+      for(let k=0;k<cloudN;k++){ const x=X(cloudG[k]), y=Y(Math.max(yMin,Math.min(yMax,cloudV[k])));
+        cx.moveTo(x+1.35,y); cx.arc(x,y,1.35,0,7); }
+      cx.fill(); }
+    hdX.save(); hdX.setTransform(1,0,0,1,0,0); hdX.drawImage(cloudCv,0,0); hdX.restore();
   }
   // measured ORF for THIS source sky (jagged at low N, → HD as N→∞)
   if(N>0){
@@ -1075,7 +1149,7 @@ $('ptBtn').onclick=function(){ pulsarTerm=!pulsarTerm; this.classList.toggle('ac
 $('rerollBtn').onclick=()=>{ rng=mulberry32((Math.random()*1e9)|0); buildSourceBank();
   syncSourcePositions(); rebuildAllResponses(); rebuildCoeffs(); poke(); };
 $('arrBtn').onclick=function(){ showArray=!showArray; this.classList.toggle('active',showArray);
-  this.textContent=showArray?'Array on':'Array off'; placePulsars(); poke(); };
+  this.textContent=showArray?'NG15 array on':'NG15 array off'; placePulsars(); markSkyDirty(); poke(); };
 $('kernelBtn').onclick=function(){ kernelShell.visible=!kernelShell.visible;
   this.classList.toggle('active',kernelShell.visible); poke(); };
 $('playBtn').onclick=function(){ playing=!playing; this.classList.toggle('active',playing);
@@ -1091,7 +1165,7 @@ function moveSeg(btn){ const seg=$('scenSeg').getBoundingClientRect(), b=btn.get
   segInd.style.width=b.width+'px'; segInd.style.transform=`translateX(${b.left-seg.left-3}px)`; }
 function activateSeg(id){ segBtns.forEach(([bid])=>$(bid).classList.toggle('active',bid===id)); moveSeg($(id)); }
 segBtns.forEach(([id,n],i)=>{ $(id).onclick=()=>{ activateSeg(id);
-  tweenN(n); if(id==='psArray'){ showArray=true; $('arrBtn').classList.add('active'); $('arrBtn').textContent='Array on'; placePulsars(); }
+  tweenN(n); if(id==='psArray'){ showArray=true; $('arrBtn').classList.add('active'); $('arrBtn').textContent='NG15 array on'; placePulsars(); mollDirty=true; }
   flyTo(n>=120? 7.6 : 6.2); poke(); }; });
 
 // smooth N tween for presets
@@ -1101,12 +1175,9 @@ function tweenN(target){ const from=N, t0=performance.now(), dur=620;
     setN(Math.round(from+(target-from)*e)); if(k<1) requestAnimationFrame(nTween); else nTween=null; };
   requestAnimationFrame(nTween);
 }
-// camera fly
-let camTween=null;
-function flyTo(dist){ const from=camera.position.length(), t0=performance.now(), dur=720;
-  const f=()=>{ const k=Math.min(1,(performance.now()-t0)/dur), e=1-Math.pow(1-k,3);
-    const dd=from+(dist-from)*e; camera.position.normalize().multiplyScalar(dd);
-    if(k<1) requestAnimationFrame(f); }; requestAnimationFrame(f); }
+// camera fly: eased dolly along the current view direction (orbit-aware; instant with
+// reduced motion; a real grab cancels it)
+function flyTo(dist){ flight.toDistance(dist, 1.1); }
 
 /* ---- dragging pulsars AND gravitational-wave sources on the sky ---- */
 const ray=new THREE.Raycaster(), ndc=new THREE.Vector2();
@@ -1154,7 +1225,12 @@ addEventListener('pointermove',e=>{
   // idle hover affordance (no button pressed): grab cursor over a draggable
   if(e.buttons===0){ pick(e);
     let over=ray.intersectObjects([A.mesh,B.mesh],true).length>0 || pickSource()>=0;
-    renderer.domElement.style.cursor = over?'grab':''; }
+    renderer.domElement.style.cursor = over?'grab':'';
+    // name the real array pulsar under the cursor
+    hoverPul=null;
+    if(showArray){ const h=ray.intersectObjects(arrayMeshes,true);
+      if(h.length){ let o=h[0].object; while(o && !o.userData.pul) o=o.parent; hoverPul=o?o.userData.pul:null; } }
+  }
 });
 addEventListener('pointerdown',()=>{ if(dragging||draggingSrc!==null) renderer.domElement.style.cursor='grabbing'; });
 addEventListener('pointerup',()=>{ dragging=null; draggingSrc=null; controls.enabled=true;
@@ -1170,8 +1246,18 @@ addEventListener('keydown',e=>{ if(e.key==='h'||e.key==='H') app.classList.toggl
   if(e.key===' '){ e.preventDefault(); $('playBtn').click(); } });
 
 /* ---- sky labels (project A,B to screen) ---- */
-const labA=$('labA'), labB=$('labB'); const tmp=new THREE.Vector3();
+const labA=$('labA'), labB=$('labB'), labP=$('labP'); const tmp=new THREE.Vector3();
+const arrayMeshes=pulsars.filter(p=>!p.isFocus).map(p=>p.mesh);
+let hoverPul=null;
 function placeLabels(){
+  if(hoverPul && showArray){
+    tmp.copy(hoverPul.dir).multiplyScalar(PR).project(camera);
+    const r=sceneEl.getBoundingClientRect();
+    labP.textContent='PSR '+hoverPul.name.replace('-','−');
+    labP.style.left=(r.left+(tmp.x*0.5+0.5)*r.width)+'px';
+    labP.style.top=(r.top+(-tmp.y*0.5+0.5)*r.height-16)+'px';
+    labP.style.opacity=tmp.z<1?0.95:0;
+  } else labP.style.opacity=0;
   [[A,labA],[B,labB]].forEach(([p,el])=>{
     tmp.copy(p.dir).multiplyScalar(PR).project(camera);
     const r=sceneEl.getBoundingClientRect();
@@ -1202,16 +1288,19 @@ function loop(now){
     phaseDrift += dt*0.55;              // re-roll the realisation continuously
     rebuildCoeffs();
   }
+  flight.update(dt);
   controls.update();
-  earth.rotation.y += dt*0.10; clouds.rotation.y += dt*0.13;
+  earth.rotation.y += dt*0.10; clouds.rotation.y += dt*0.13;   // about the tilted (polar) axis
   for(const p of pulsars){ if(p.spin) p.spin.rotation.y += dt*3.4; } // lighthouse sweep
   // keep the overlap-kernel shell in sync with the two pulsar directions
   if(kernelShell.visible){ kernelMat.uniforms.uA.value.copy(A.dir); kernelMat.uniforms.uB.value.copy(B.dir); }
   placePulsars(); placeLabels();
-  composer.render();
+  pipeline.render();
   drawTS(); drawHD(); drawMollweide(); updatePhys();
   requestAnimationFrame(loop);
 }
+
+window.HD={pulsars,A,B,sky,earthGroup,earth,EQ2SC,camera,get N(){return N;}};   // debugging / scripted demos
 
 /* ---- boot ---- */
 placePulsars(); updateArc(); refreshGeom(); setN(1);

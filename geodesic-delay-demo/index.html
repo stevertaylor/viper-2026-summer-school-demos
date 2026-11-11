@@ -386,12 +386,8 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { Line2 } from 'three/addons/lines/Line2.js';
-import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
-import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { createPipeline, FatLine, CameraFlight, respectReducedMotion } from '../shared/gfx.js';
+import { createSky, NANOGRAV_15YR } from '../shared/sky.js';
 
 /* =================================================================== *
  *  PHYSICS — pulse arrival-time delay from a plane gravitational wave
@@ -511,20 +507,24 @@ function hField(t, point){
  *  THREE.js SCENE
  * =================================================================== */
 const sceneEl=document.getElementById('scene');
-const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+// antialias:false — the pipeline draws the scene into a 4x MSAA HDR target; opaque canvas
+// (the real sky replaces the old CSS gradient backdrop).
+const renderer=new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
 renderer.outputColorSpace=THREE.SRGBColorSpace;
 renderer.toneMapping=THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure=1.06;
 sceneEl.appendChild(renderer.domElement);
 
 const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x04070b);           // = --bg
 const camera=new THREE.PerspectiveCamera(46,1,0.1,400);
 camera.position.set(1.74,2.91,9.63);
 const controls=new OrbitControls(camera,renderer.domElement);
 controls.enableDamping=true; controls.dampingFactor=0.07;
 controls.minDistance=4.8; controls.maxDistance=28; controls.enablePan=false;
 controls.autoRotateSpeed=0.45;
+respectReducedMotion(controls);
+const flight=new CameraFlight(camera, controls);
 
 scene.add(new THREE.AmbientLight(0x36405a,1.0));
 const sun=new THREE.DirectionalLight(0xfff4e2,2.0); sun.position.set(5,3,4); scene.add(sun);
@@ -534,16 +534,14 @@ const key=new THREE.PointLight(0x9fd8ff,0.4,30); key.position.set(0,0,0); scene.
 const PR = 6.2;     // visual pulsar distance (FIXED — real L only sets the term lag)
 const SKY = 6.8;    // celestial-sphere radius for the Ω̂ node (beyond the pulsar, on the sky)
 
-// starfield
-(function(){
-  const n=1400, pos=new Float32Array(n*3);
-  for(let i=0;i<n;i++){
-    const r=40+Math.random()*120, u=Math.random()*2-1, t=Math.random()*2*Math.PI, s=Math.sqrt(1-u*u);
-    pos[i*3]=r*s*Math.cos(t); pos[i*3+1]=r*u; pos[i*3+2]=r*s*Math.sin(t);
-  }
-  const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(pos,3));
-  scene.add(new THREE.Points(g,new THREE.PointsMaterial({color:0x9fb4d6,size:0.55,sizeAttenuation:false,transparent:true,opacity:0.7})));
-})();
+// the real sky, in ECLIPTIC orientation (scene +Y = ecliptic north), so the tilted Earth's
+// spin axis points at the true north celestial pole (near Polaris)
+const sky=createSky(scene,{frame:'ecliptic', renderer, mwGain:0.42, starGain:0.5});
+// The pulsar sits in the true sky direction of PSR J1909−3744 (NANOGrav 15-yr; ATNF position).
+// Only its DIRECTION is real — its distance is drawn not to scale (see the L placard).
+const PSR_REF=NANOGRAV_15YR.find(q=>q.name==='J1909-3744');
+const PSR_DIR=sky.dir(PSR_REF.ra, PSR_REF.dec);
+phat.copy(PSR_DIR);
 
 // ---- Earth (the observer): procedural day map + clouds + atmosphere ----
 const ER=0.30;
@@ -589,19 +587,30 @@ function makeCloudTexture(){
 const earth=new THREE.Mesh(new THREE.SphereGeometry(ER,48,48),
   new THREE.MeshStandardMaterial({map:makeEarthTexture(),emissive:0x0a1830,emissiveIntensity:0.35,
     roughness:0.85,metalness:0.0}));
-earth.rotation.z=0.41; scene.add(earth);
+// Earth's spin axis → the north celestial pole of the sky above. The tilt lives on a PARENT
+// group so the child spins about its own axis (rotation.z then rotation.y on one Euler-XYZ
+// object instead precessed the axis around world Y).
+const earthTilt=new THREE.Group(); scene.add(earthTilt);
+earthTilt.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), sky.pole);
+earthTilt.add(earth);
 const clouds=new THREE.Mesh(new THREE.SphereGeometry(ER*1.012,48,48),
   new THREE.MeshStandardMaterial({map:makeCloudTexture(),transparent:true,opacity:0.55,
     depthWrite:false,roughness:1}));
-clouds.rotation.z=0.41; scene.add(clouds);
+earthTilt.add(clouds);
 const atmMat=new THREE.ShaderMaterial({
-  uniforms:{glowColor:{value:new THREE.Color(0x5aa6ff)},p:{value:3.2},s:{value:1.05}},
+  uniforms:{glowColor:{value:new THREE.Color(0x5aa6ff)},p:{value:1.6},s:{value:1.5}},
   vertexShader:`varying vec3 vN; varying vec3 vV;
     void main(){ vec4 mv=modelViewMatrix*vec4(position,1.0); vN=normalize(normalMatrix*normal);
       vV=normalize(-mv.xyz); gl_Position=projectionMatrix*mv; }`,
   fragmentShader:`varying vec3 vN; varying vec3 vV; uniform vec3 glowColor; uniform float p; uniform float s;
-    void main(){ float rim=pow(1.0-max(dot(vN,vV),0.0),p); gl_FragColor=vec4(glowColor, rim*s); }`,
-  side:THREE.BackSide,blending:THREE.AdditiveBlending,transparent:true,depthWrite:false});
+    // Back faces of the shell only. For an optically thin uniform shell the line-of-sight column
+    // at impact parameter b is 2√(R²−b²) = 2R·|n̂·v̂|: brightest at the limb, zero at the shell
+    // edge. p>1 mimics the falloff with altitude. (The old 1−max(n̂·v̂,0) was ≡1 on back faces:
+    // a flat annulus.)  clamp() also keeps pow() away from negative bases (NaN → bloom black-out).
+    void main(){ float col=pow(clamp(-dot(vN,vV),0.0,1.0),p);
+      gl_FragColor=vec4(glowColor*min(col*s,4.0), 1.0); }`,
+  side:THREE.BackSide,blending:THREE.CustomBlending,blendSrc:THREE.OneFactor,blendDst:THREE.OneFactor,
+  transparent:true,depthWrite:false});   // additive in colour, alpha untouched (α≤1 everywhere)
 scene.add(new THREE.Mesh(new THREE.SphereGeometry(ER*1.28,48,48),atmMat));
 
 // ---- pulsar: rotating neutron star + tilted magnetosphere + twin beams ----
@@ -634,29 +643,43 @@ const pulsarSpin=new THREE.Group(); pulsarGroup.add(pulsarSpin);
   const capMat=new THREE.MeshBasicMaterial({color:0xfff6e6});
   const cA=new THREE.Mesh(new THREE.SphereGeometry(R*0.30,12,12),capMat); cA.position.y=R*0.95; mag.add(cA);
   const cB=cA.clone(); cB.position.y=-R*0.95; mag.add(cB);
-  const fieldMat=new THREE.LineBasicMaterial({color:col,transparent:true,opacity:0.28});
+  // dipole field lines r = Lmax sin²θ
   const Lmax=R*5.0;
   for(let j=0;j<6;j++){ const phi=j*Math.PI/3, pts=[];
     for(let k=1;k<40;k++){ const th=Math.PI*k/40, r=Lmax*Math.sin(th)*Math.sin(th);
       const xr=r*Math.sin(th), yy=r*Math.cos(th);
       pts.push(new THREE.Vector3(xr*Math.cos(phi),yy,xr*Math.sin(phi))); }
-    mag.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),fieldMat)); }
+    mag.add(new FatLine(pts.length,{color:col, width:1.1, opacity:0.32, points:pts})); }
 })();
 
 // ---- the geodesic baseline (pulsar → Earth) ----
 // A faint guide line; the luminous pulse-train trace (built below) rides along it.
-const losGeo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]);
-const los=new THREE.Line(losGeo,new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.16}));
-scene.add(los);
+const los=new FatLine(2,{color:0xffffff, width:1.0, opacity:0.18}); scene.add(los);
 
-// ---- moving wavefronts: translucent planes ⟂ Ω̂ sweeping along Ω̂ ----
-const NWF=11;
+// ---- moving wavefronts: soft discs ⟂ Ω̂ at the crests of the displayed field ----
+// Each disc sits exactly where the plotted scalar h(t − Ω̂·x) has a crest, so the discs are
+// spaced by one true wavelength λ = c/f (c = 1, scene unit = 1 light-year, as in hField) and
+// stream along +Ω̂, away from the source, at c. A pool covers the densest case (f = 50 nHz).
+const WF_HALF=6.5, NWF_MAX=24;
 const wavefronts=new THREE.Group(); scene.add(wavefronts);
+const wfGeo=new THREE.PlaneGeometry(2*WF_HALF,2*WF_HALF,1,1);
 const wfMeshes=[];
-for(let i=0;i<NWF;i++){
-  const m=new THREE.Mesh(new THREE.PlaneGeometry(13,13,1,1),
-    new THREE.MeshBasicMaterial({color:new THREE.Color(0x5fd3b2),transparent:true,opacity:0.0,
-      side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending}));
+for(let i=0;i<NWF_MAX;i++){
+  const mat=new THREE.ShaderMaterial({
+    uniforms:{ col:{value:new THREE.Color(0x5fd3b2)}, op:{value:0} },
+    vertexShader:`varying vec2 vQ; varying vec3 vN; varying vec3 vV;
+      void main(){ vQ=uv*2.0-1.0; vec4 mv=modelViewMatrix*vec4(position,1.0);
+        vN=normalize(normalMatrix*normal); vV=-mv.xyz; gl_Position=projectionMatrix*mv; }`,
+    // radial soft edge (a circular wavefront patch, no hard square border), and thin-sheet
+    // emission: the path length through a sheet ∝ 1/|n̂·v̂|, so it glows brightest edge-on and
+    // stays a faint veil face-on (capped to avoid a singular edge).
+    fragmentShader:`varying vec2 vQ; varying vec3 vN; varying vec3 vV; uniform vec3 col; uniform float op;
+      void main(){ float r=length(vQ);
+        float mu=abs(dot(normalize(vN),normalize(vV)));
+        float a=op*(1.0-smoothstep(0.30,1.0,r))*min(0.30/max(mu,1e-3),1.8);
+        if(a<=0.0) discard; gl_FragColor=vec4(col,min(a,1.0)); }`,
+    transparent:true, depthWrite:false, side:THREE.DoubleSide, blending:THREE.AdditiveBlending });
+  const m=new THREE.Mesh(wfGeo,mat); m.visible=false;
   wavefronts.add(m); wfMeshes.push(m);
 }
 // Ω̂ direction node on the sky (draggable)
@@ -671,18 +694,21 @@ const omGrab=new THREE.Mesh(new THREE.SphereGeometry(0.26,8,8),new THREE.MeshBas
 scene.add(omGrab);
 // arrow showing Ω̂ propagation through the scene
 const omArrow=new THREE.ArrowHelper(new THREE.Vector3(0,0,1),new THREE.Vector3(),3.6,0x5fd3b2,0.56,0.30);
-omArrow.line.material.transparent=true; omArrow.line.material.opacity=0.6;
+omArrow.line.visible=false;                       // 1-px GL line → replaced by a fat shaft
 omArrow.cone.material.transparent=true; omArrow.cone.material.opacity=0.75;
 scene.add(omArrow);
+const omShaft=new FatLine(2,{color:0x5fd3b2, width:2.0, opacity:0.6}); scene.add(omShaft);
 
 // ---- transverse test-mass ring (the "what is a metric perturbation" callout) ----
 // A ring of test masses in the (m̂,n̂) plane, deformed by δx_i = ½ h_ij x_j.
 const NRING=48, RING_R=0.55;
-const ringGeo=new THREE.BufferGeometry();
-ringGeo.setAttribute('position',new THREE.BufferAttribute(new Float32Array((NRING+1)*3),3));
-const ringLine=new THREE.LineLoop(ringGeo,new THREE.LineBasicMaterial({color:0xeafff7,transparent:true,opacity:0.85}));
-const ringDots=new THREE.Points(ringGeo.clone(),new THREE.PointsMaterial({color:0xeafff7,size:0.05,
-  transparent:true,opacity:0.9,sizeAttenuation:true}));
+const ringArr=new Float32Array(NRING*3);
+const ringLine=new FatLine(NRING,{color:0xeafff7, width:1.8, opacity:0.85, loop:true});
+const ringDotGeo=new THREE.BufferGeometry();
+ringDotGeo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(NRING*3),3));
+const ringDots=new THREE.Points(ringDotGeo,new THREE.PointsMaterial({color:0xeafff7,size:0.075,
+  map:discTexture(), transparent:true, opacity:0.95, depthWrite:false, sizeAttenuation:true}));   // round, not square
+ringDots.frustumCulled=false;
 const ringGroup=new THREE.Group(); ringGroup.add(ringLine); ringGroup.add(ringDots);
 // place the ring midway along the geodesic
 scene.add(ringGroup);
@@ -713,32 +739,21 @@ const railOff=new THREE.Vector3();           // transverse "amplitude" axis (⟂
 const _vdir=new THREE.Vector3(), _up=new THREE.Vector3(); // billboard the bumps toward the camera
 const trainPosArr=new Float32Array(MSAMP*3); // bright (perturbed) trace
 const refPosArr=new Float32Array(MSAMP*3);   // faint regular (no-wave) trace
-const trainGeo=new LineGeometry(); trainGeo.setPositions(trainPosArr);
-const refGeo=new LineGeometry();   refGeo.setPositions(refPosArr);
-const trainMat=new LineMaterial({color:0xeaf4ff, linewidth:3.4, transparent:true, opacity:0.98,
-  blending:THREE.AdditiveBlending, depthWrite:false, dashed:false});
-const refMat=new LineMaterial({color:0x6f86a8, linewidth:1.6, transparent:true, opacity:0.42,
-  blending:THREE.AdditiveBlending, depthWrite:false, dashed:false});
-trainMat.resolution.set(innerWidth,innerHeight); refMat.resolution.set(innerWidth,innerHeight);
-const trainLine=new Line2(trainGeo,trainMat); trainLine.computeLineDistances();
-const refLine=new Line2(refGeo,refMat); refLine.computeLineDistances();
+const trainLine=new FatLine(MSAMP,{color:0xeaf4ff, width:3.4, opacity:0.98, additive:true});
+const refLine=new FatLine(MSAMP,{color:0x6f86a8, width:1.6, opacity:0.42, additive:true});
 scene.add(refLine); scene.add(trainLine);
 // soft arrival glow at Earth — pulses gently brighten it as each peak lands
 const arrivalFlash=new THREE.Sprite(new THREE.SpriteMaterial({map:DISC,color:0xbfe0ff,
   transparent:true,opacity:0,depthWrite:false,blending:THREE.AdditiveBlending}));
 arrivalFlash.scale.setScalar(0.6); scene.add(arrivalFlash);
 
-// bloom
-const composer=new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene,camera));
-const bloom=new UnrealBloomPass(new THREE.Vector2(1,1),0.62,0.6,0.84);
-composer.addPass(bloom);
+// post: MSAA HDR scene → bloom → exposure / ACES / sRGB / lens vignette / dither
+const pipeline=createPipeline({renderer, scene, camera, bloom:[0.62,0.6,0.84]});
 
 function resize(){
   const w=sceneEl.clientWidth,h=sceneEl.clientHeight;
-  renderer.setSize(w,h); composer.setSize(w,h);
+  pipeline.setSize(w,h);                          // also updates every fat line's resolution
   camera.aspect=w/h; camera.updateProjectionMatrix();
-  trainMat.resolution.set(w,h); refMat.resolution.set(w,h);   // fat lines need pixel resolution
 }
 addEventListener('resize',resize); resize();
 
@@ -755,14 +770,13 @@ function fieldColor(v){ // v ~ metric value (×1e-15); map signed → dark↔eme
 function placeGeometry(){
   // pulsar
   const pp=phat.clone().multiplyScalar(PR); pulsarGroup.position.copy(pp);
-  losGeo.attributes.position.setXYZ(0,pp.x,pp.y,pp.z);
-  losGeo.attributes.position.setXYZ(1,0,0,0);
-  losGeo.attributes.position.needsUpdate=true;
+  los.setPoints([pp, new THREE.Vector3()]);
   // Ω̂ node sits where the wave comes FROM (−Ω̂ direction on the sky)
   const onode=Omega.clone().multiplyScalar(-SKY);
   omNode.position.copy(onode); omGlow.position.copy(onode); omGrab.position.copy(onode);
   omArrow.position.copy(Omega.clone().multiplyScalar(-4.4));
   omArrow.setDirection(Omega);
+  omShaft.setPoints([omArrow.position, omArrow.position.clone().addScaledVector(Omega,3.6-0.56)]);
   // wavefronts oriented ⟂ Ω̂
   const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),Omega);
   for(const m of wfMeshes) m.quaternion.copy(q);
@@ -779,28 +793,33 @@ function placeGeometry(){
  * =================================================================== */
 const _pt=new THREE.Vector3();
 function updateWavefronts(tNow){
-  // crests where sin(...) is max. Lay planes at constant phase along Ω̂, sliding.
-  const w=omegaYr(), spacing=2*Math.PI; // one wavelength in phase units
-  for(let i=0;i<NWF;i++){
-    // distance along Ω̂ (scene units) for the i-th crest at time tNow
-    const phase=w*tNow;
-    const k=i-(NWF>>1);
-    // crest position in scene: choose offsets spanning the scene
-    const off = ((k - (phase/spacing)%1) )* (13/NWF);
-    const m=wfMeshes[i];
-    m.position.copy(Omega).multiplyScalar(off);
-    // brightness by |sin| of the local field at the plane centre
-    const v=hField(tNow, m.position);
-    m.material.opacity = wavefrontsOn ? 0.04+0.10*Math.abs(v)/Math.max(0.6,h0_15) : 0;
-    m.material.color.copy(fieldColor(v));
+  // displayed scalar  h+ + h× = Ap sin(ωξ) + Ac cos(ωξ) = R sin(ωξ + δ),  ξ = t − Ω̂·x
+  // crests:  ω(t − s) + δ = π/2 + 2πn   ⇒   s_n = t − (π/2 − δ)/ω − nλ ,  λ = 2π/ω
+  const w=omegaYr(), lam=2*Math.PI/w, {Ap,Ac}=strainAmps();
+  const R=Math.hypot(Ap,Ac), delta=Math.atan2(Ac,Ap);
+  const s0=tNow-(Math.PI/2-delta)/w;
+  const dens=Math.min(1, lam/2.2);                     // keep total haze ~constant as crests crowd
+  const op0=0.11*dens*THREE.MathUtils.smoothstep(R,0,0.6);
+  const col=fieldColor(R);                              // crest colour (peak of the field)
+  let k=0;
+  for(let n=Math.ceil((s0-WF_HALF)/lam); k<NWF_MAX; n++){
+    const sn=s0-n*lam; if(sn<-WF_HALF) break;
+    const m=wfMeshes[k++];
+    m.position.copy(Omega).multiplyScalar(sn);
+    // fade in/out over the last 1.4 units so discs never pop at the ends of the slab
+    const edge=THREE.MathUtils.smoothstep(WF_HALF-Math.abs(sn),0,1.4);
+    m.material.uniforms.op.value=wavefrontsOn?op0*edge:0;
+    m.material.uniforms.col.value.copy(col);
+    m.visible=true;
   }
+  for(;k<NWF_MAX;k++) wfMeshes[k].visible=false;
 }
 function updateRing(tNow){
   const c=ringGroup.position;
   const xi = tNow - Omega.dot(c);
   const hp = hplus(xi)*1e0,  hc = hcross(xi)*1e0;   // ×1e-15 units (visual gain below)
   const GAIN=0.16/Math.max(0.6,h0_15);              // exaggerate for visibility
-  const pos=ringGeo.attributes.position;
+  const dots=ringDotGeo.attributes.position;
   for(let i=0;i<NRING;i++){
     const [a,b]=ring0[i];                            // unit coords in (m,n) plane
     // δx = ½ h_ij x_j  with x = a·m̂ + b·n̂ in transverse plane:
@@ -809,13 +828,10 @@ function updateRing(tNow){
     const db = 0.5*(-hp*b + hc*a)*GAIN;
     const ca=(a+da)*RING_R, cb=(b+db)*RING_R;
     const v=mhat.clone().multiplyScalar(ca).addScaledVector(nhat,cb);
-    pos.setXYZ(i, v.x, v.y, v.z);
+    ringArr[3*i]=v.x; ringArr[3*i+1]=v.y; ringArr[3*i+2]=v.z;
   }
-  // close the loop
-  pos.setXYZ(NRING, pos.getX(0), pos.getY(0), pos.getZ(0));
-  pos.needsUpdate=true;
-  ringDots.geometry.attributes.position.array.set(pos.array);
-  ringDots.geometry.attributes.position.needsUpdate=true;
+  ringLine.setPoints(ringArr);
+  dots.array.set(ringArr); dots.needsUpdate=true;
   ringGroup.visible = ringOn;
 }
 // The gravitational wave modulates the pulse arrival RATE — a Doppler effect. We render the
@@ -860,7 +876,7 @@ function updateTrain(){
     trainPosArr[i*3]  =px+off.x*PHEIGHT*g;  trainPosArr[i*3+1]=py+off.y*PHEIGHT*g;  trainPosArr[i*3+2]=pz+off.z*PHEIGHT*g;
     refPosArr[i*3]    =px+off.x*PHEIGHT*g0; refPosArr[i*3+1]  =py+off.y*PHEIGHT*g0; refPosArr[i*3+2]  =pz+off.z*PHEIGHT*g0;
   }
-  trainGeo.setPositions(trainPosArr); refGeo.setPositions(refPosArr);
+  trainLine.setPoints(trainPosArr); refLine.setPoints(refPosArr);
   // soft Earth glow as each peak lands (irregular cadence = the GW Doppler shift, made visible)
   const gE=gauss(NP2 - TWO*trainPhase + Wamp*Math.sin(NW2 - densPhase));
   arrivalFlash.material.opacity = 0.85*gE;
@@ -1048,29 +1064,29 @@ const scenInfo={
       lies a distance <b>L</b> away along p̂. The wave travels along Ω̂, away from the
       <b style="color:var(--wave)">GW source</b> at −Ω̂. Only the source–pulsar angle <b>γ</b>
       (cos γ = −Ω̂·p̂) will matter. Drag either node.`,
-    cam:10.4, dim:['eq1','eq2','eq3','eq4'], et:true, pt:true, wf:false, ring:false },
+    dim:['eq1','eq2','eq3','eq4'], et:true, pt:true, wf:false, ring:false },
   psMetric:{ text:`<b>The metric.</b> h<sub>ij</sub> is a ripple in spacetime. Watch the
       <b style="color:var(--wave)">test ring</b> stretch and squeeze in the plane transverse to Ω̂,
       and the <b style="color:var(--wave)">wavefronts</b> sweep through at light speed. This is the
       field the photon must cross.`,
-    cam:9.3, dim:['eq2','eq3','eq4'], et:true, pt:true, wf:true, ring:true },
+    dim:['eq2','eq3','eq4'], et:true, pt:true, wf:true, ring:true },
   psPath:{ text:`<b>The pulses' journey.</b> A steady train of pulses travels from the pulsar to
       Earth along the <b>geodesic</b>. The wave warps the spacing of the
       <b style="color:#eaf4ff">bright train</b> away from the <b style="color:#9db8d8">no-wave
       train</b> behind it; that shift is the perturbation integrated down the path — watch the
       <b style="color:var(--integ)">running integral</b> build up below.`,
-    cam:8.4, dim:['eq3','eq4'], et:true, pt:true, wf:true, ring:false },
+    dim:['eq3','eq4'], et:true, pt:true, wf:true, ring:false },
   psTerms:{ text:`<b>Two terms.</b> Because a plane wave depends on a single phase, the line-integral
       is a total derivative — it collapses to the <b style="color:var(--earth)">Earth term</b>
       (h now) minus the <b style="color:var(--pulsar)">pulsar term</b> (h at emission,
       L(1−cos γ) earlier). Toggle each on the right.`,
-    cam:8.9, dim:['eq4'], et:true, pt:true, wf:false, ring:false },
+    dim:['eq4'], et:true, pt:true, wf:false, ring:false },
   psAnt:{ text:`<b>Response vs. angle.</b> Sweep <b>γ</b>: the timing response vanishes at both
       ends. At <b>γ = 180°</b> (pulsar opposite the source, p̂ ∥ Ω̂) the antenna pattern
       F<sup>A</sup> = ½ p̂<sub>i</sub>p̂<sub>j</sub>e<sup>A</sup>/(1+Ω̂·p̂) is zero — the GW is transverse to the line of
       sight. At <b>γ = 0</b> (pulsar toward the source) the lag τ = L(1−cos γ) → 0, so the Earth
       and pulsar terms share one phase and cancel — an interference null.`,
-    cam:11.0, dim:[], et:true, pt:true, wf:true, ring:false },
+    dim:[], et:true, pt:true, wf:true, ring:false },
 };
 const segBtns=['psGeom','psMetric','psPath','psTerms','psAnt'];
 const segInd=$('segInd');
@@ -1085,15 +1101,69 @@ function activateScen(id){
   $('etBtn').classList.toggle('active',showEarth); $('ptBtn').classList.toggle('active',showPulsar);
   $('wfBtn').classList.toggle('active',wavefrontsOn); $('ringBtn').classList.toggle('active',ringOn);
   wavefronts.visible=wavefrontsOn; ringGroup.visible=ringOn;
-  flyTo(sc.cam); poke();
+  flyTo(id); poke();
 }
 segBtns.forEach(id=>$(id).onclick=()=>activateScen(id));
 
-// camera fly
-function flyTo(d){ const from=camera.position.length(), t0=performance.now(), dur=720;
-  const f=()=>{ const k=Math.min(1,(performance.now()-t0)/dur), e=1-Math.pow(1-k,3);
-    camera.position.normalize().multiplyScalar(from+(d-from)*e);
-    if(k<1) requestAnimationFrame(f); }; requestAnimationFrame(f); }
+// ---- camera framing per step (computed from the CURRENT geometry, so it always works) ----
+// n̂ = normal of the plane spanned by p̂ and Ω̂. Looking along n̂ shows the source–Earth–pulsar
+// angle γ undistorted; a modest tilt toward ecliptic-north adds depth.
+const _Y=new THREE.Vector3(0,1,0);
+function planeNormal(){
+  const n=new THREE.Vector3().crossVectors(phat,Omega);
+  if(n.lengthSq()<1e-6) n.crossVectors(phat,_Y);
+  if(n.lengthSq()<1e-6) n.set(1,0,0);
+  n.normalize(); if(n.y<0) n.negate();
+  return n;
+}
+function camFor(id){
+  const n=planeNormal(), P=phat.clone().multiplyScalar(PR), S=Omega.clone().multiplyScalar(-SKY);
+  const mid=P.clone().multiplyScalar(0.5);
+  let tgt, dir, d;
+  if(id==='psMetric'){            // the test ring and wavefronts: oblique, from the source side
+    tgt=mid; d=7.2;
+    dir=n.clone().multiplyScalar(0.80).addScaledVector(Omega,-0.60);
+  } else if(id==='psPath'||id==='psTerms'){   // broadside to the geodesic: the pulse train
+    tgt=mid; d=id==='psPath'?7.4:8.0;
+    const side=new THREE.Vector3().crossVectors(phat,n).normalize();   // in-plane, ⟂ p̂
+    dir=n.clone().multiplyScalar(0.93).addScaledVector(side,-0.18).addScaledVector(_Y,0.22);
+  } else {                         // setup / pattern: the whole source–Earth–pulsar triangle
+    tgt=P.clone().add(S).multiplyScalar(1/3); d=id==='psAnt'?13.5:12.5;
+    dir=n.clone().addScaledVector(_Y,0.25);
+  }
+  dir.normalize();
+  d=Math.min(controls.maxDistance, d*fitFactor());
+  return { pos:tgt.clone().addScaledVector(dir,d), tgt };
+}
+// The step distances above were composed for the reference layout (1512×734: free viewport
+// ≈ 76% of the width × 69% of the height). Pull back when the free viewport is smaller, so the
+// same scene still fits — width-limited via aspect×free-width, height-limited via free-height.
+function fitFactor(){
+  const W=sceneEl.clientWidth, H=sceneEl.clientHeight, a=W/H;
+  let fx=1, fy=1;
+  if(!app.classList.contains('immersive')){
+    const sb=$('sidebar').getBoundingClientRect(), pt=Math.min($('accPanel').getBoundingClientRect().top,H);
+    if(sb.width<=0.45*W && pt>=0.4*H){ fx=(W-sb.right)/W; fy=pt/H; }
+  }
+  return THREE.MathUtils.clamp(Math.max((2.06*0.757)/(a*fx), 0.687/fy), 1, 2.2);
+}
+function flyTo(id, dur=1.3){ const c=camFor(id); flight.to(c.pos, c.tgt, dur); }
+// Shift the principal point into the part of the screen NOT covered by the sidebar and the
+// bottom plot panels (measured from the live layout), easing back to centre in immersive mode.
+const viewOff={x:0,y:0};
+function targetViewOffset(){
+  const W=sceneEl.clientWidth, H=sceneEl.clientHeight;
+  if(app.classList.contains('immersive')) return {x:0,y:0};
+  const sb=$('sidebar').getBoundingClientRect(), pt=Math.min($('accPanel').getBoundingClientRect().top, H);
+  if(sb.width>0.45*W || pt<0.4*H) return {x:0,y:0};          // stacked / narrow layouts: leave centred
+  return { x:0.5*sb.right*0.9, y:-0.5*(H-pt)*0.9 };         // + = content right, − = content up
+}
+function updateViewOffset(dt){
+  const t=targetViewOffset(), k=1-Math.exp(-dt*6);
+  viewOff.x+=(t.x-viewOff.x)*k; viewOff.y+=(t.y-viewOff.y)*k;
+  const W=sceneEl.clientWidth, H=sceneEl.clientHeight;
+  camera.setViewOffset(W,H,-viewOff.x,-viewOff.y,W,H);
+}
 
 /* ---- dragging the pulsar and the Ω̂ node on the sky ---- */
 const ray=new THREE.Raycaster(), ndc=new THREE.Vector2();
@@ -1136,7 +1206,10 @@ function project(v3,el,dy){ tmp.copy(v3).project(camera);
   el.style.left=(r.left+(tmp.x*0.5+0.5)*r.width)+'px';
   el.style.top=(r.top+(-tmp.y*0.5+0.5)*r.height+(dy||0))+'px';
   el.style.opacity=tmp.z<1?0.95:0; }
+let _labPName='';
 function placeLabels(){
+  const nm = phat.angleTo(PSR_DIR)<2e-3 ? 'PSR J1909−3744' : 'pulsar';
+  if(nm!==_labPName){ labP.textContent=nm; _labPName=nm; }
   project(phat.clone().multiplyScalar(PR),labP,-16);
   project(Omega.clone().multiplyScalar(-SKY),labO,-16);
   project(phat.clone().multiplyScalar(PR*0.5),placL,18);
@@ -1188,14 +1261,16 @@ function loop(now){
     trainPhase=(trainPhase + dt*0.6)%1;            // pulses travel toward Earth (peaks march down)
     densPhase += dt*(0.45 + fnHz*0.04);            // warp pattern drifts; faster GW → faster
   }
+  flight.update(dt);
+  updateViewOffset(dt);
   controls.update();
-  earth.rotation.y += dt*0.10; clouds.rotation.y += dt*0.13;
+  earth.rotation.y += dt*0.10; clouds.rotation.y += dt*0.13;   // about Earth's own (tilted) axis
   pulsarSpin.rotation.y += dt*3.4;
   // field updates
   updateWavefronts(tNow); updateRing(tNow); updateTrain();
   omGlow.material.opacity=0.18+0.10*Math.sin(now*0.003);
   placeLabels();
-  composer.render();
+  pipeline.render();
   drawAcc(tNow); drawTS(); updatePhys();
   requestAnimationFrame(loop);
 }
@@ -1207,6 +1282,7 @@ amp.value=h0_15; $('ampV').textContent=h0_15.toFixed(1)+'×10⁻¹⁵'; paintRan
 dist.value=Lkpc; $('distV').textContent=Lkpc.toFixed(2)+' kpc'; paintRange(dist);
 psiEl.value=0; $('psiV').textContent='0°'; paintRange(psiEl);
 placeGeometry(); refreshGeom();
+{ const c=camFor('psGeom'); flight.to(c.pos, c.tgt, 0); }   // start already framed
 requestAnimationFrame(t=>{ last=t; loop(t); });
 addEventListener('load',()=>{ setTimeout(()=>{ setPol('both','polB'); activateScen('psGeom'); },60); });
 

@@ -346,10 +346,8 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { createPipeline, FatLine, CameraFlight, respectReducedMotion } from '../shared/gfx.js';
+import { createSky } from '../shared/sky.js';
 
 /* ============================================================
    PHYSICS — the multipole ladder of an isolated source
@@ -523,8 +521,9 @@ function lookupQ(tr){        // retarded-time lookup with linear interpolation
    SCENE
    ============================================================ */
 const sceneEl=document.getElementById('scene');
-const renderer=new THREE.WebGLRenderer({antialias:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+// antialias:false — the scene is drawn into a 4x MSAA HDR target by the pipeline; the
+// canvas's own MSAA would only ever see the final full-screen quad.
+const renderer=new THREE.WebGLRenderer({antialias:false, powerPreference:'high-performance'});
 renderer.toneMapping=THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure=1.06;
 renderer.outputColorSpace=THREE.SRGBColorSpace;
@@ -540,16 +539,17 @@ controls.enableDamping=true; controls.dampingFactor=0.08;
 controls.autoRotate=true; controls.autoRotateSpeed=0.4;
 controls.minDistance=5; controls.maxDistance=120;
 
-let camTween=null;
-function flyTo(pos,tgt=[0,0,0],dur=0.95){
+respectReducedMotion(controls);
+// eased camera moves that orbit the target instead of cutting a chord through the scene
+const flight=new CameraFlight(camera,controls);
+function flyTo(pos,tgt=[0,0,0],dur=1.25){
   controls.autoRotate=false;
-  camTween={ p0:camera.position.clone(), p1:new THREE.Vector3(...pos),
-    t0:controls.target.clone(), t1:new THREE.Vector3(...tgt), e:0, dur };
+  flight.to(pos,tgt,dur);
 }
 let idleT;
 function userActive(){
   controls.autoRotate=false; clearTimeout(idleT);
-  idleT=setTimeout(()=>{ if(!camTween) controls.autoRotate=true; },5000);
+  idleT=setTimeout(()=>{ if(!flight.active) controls.autoRotate=true; },5000);
 }
 controls.addEventListener('start',userActive);
 
@@ -560,30 +560,17 @@ window.addEventListener('pointermove',uiActive);
 window.addEventListener('keydown',uiActive);
 uiActive();
 
-const composer=new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene,camera));
-composer.addPass(new UnrealBloomPass(new THREE.Vector2(1,1),0.70,0.6,0.82));
-composer.addPass(new OutputPass());
+// post-processing: MSAA HDR scene → bloom → tone map / sRGB / lens vignette / dither
+const pipeline=createPipeline({renderer, scene, camera, bloom:[0.70, 0.6, 0.82]});
 
 scene.add(new THREE.AmbientLight(0xffffff,0.36));
 const keyL=new THREE.PointLight(0xfff0e0,1.1,0,2); keyL.position.set(10,16,10); scene.add(keyL);
 const rimL=new THREE.PointLight(0xff7d9c,0.55,0,2); rimL.position.set(-12,5,-10); scene.add(rimL);
 
-// starfield
-(()=>{
-  const N=1500, pos=new Float32Array(N*3), col=new Float32Array(N*3);
-  for(let i=0;i<N;i++){
-    const r=150+250*Math.random(), th=Math.acos(2*Math.random()-1), ph=Math.random()*2*Math.PI;
-    pos[3*i]=r*Math.sin(th)*Math.cos(ph); pos[3*i+1]=r*Math.cos(th); pos[3*i+2]=r*Math.sin(th)*Math.sin(ph);
-    const b=0.45+0.55*Math.random(), tint=Math.random();
-    col[3*i]=b*(tint<0.15?0.85:1); col[3*i+1]=b*0.96; col[3*i+2]=b*(tint>0.85?0.85:1);
-  }
-  const g=new THREE.BufferGeometry();
-  g.setAttribute('position',new THREE.BufferAttribute(pos,3));
-  g.setAttribute('color',new THREE.BufferAttribute(col,3));
-  scene.add(new THREE.Points(g,new THREE.PointsMaterial({size:1.15,vertexColors:true,
-    sizeAttenuation:false,transparent:true,opacity:0.85,depthWrite:false})));
-})();
+// the real sky (BSC5 stars + Gaia/Hipparcos/Tycho diffuse map), at infinity — kept dim
+// so it never competes with the wave field
+const sky=createSky(scene,{frame:'equatorial', renderer, mwGain:0.32, starGain:0.42,
+  rotation:new THREE.Euler(0.35, 2.2, 0.5)});   // cosmetic framing
 
 // procedural sprite + textures
 function glowSprite(color,scale){
@@ -628,25 +615,22 @@ const mShake2=new THREE.Mesh(new THREE.SphereGeometry(0.55,32,24),
   new THREE.MeshStandardMaterial({color:0x8896ad, emissive:0x37415a, emissiveIntensity:0.45, roughness:0.55}));
 const shakeHandle=new THREE.Mesh(new THREE.SphereGeometry(1.05,12,8),
   new THREE.MeshBasicMaterial({colorWrite:false, depthWrite:false}));
-const axisLine=new THREE.Line(
-  new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-6,0,0),new THREE.Vector3(6,0,0)]),
-  new THREE.LineBasicMaterial({color:0x3a4763,transparent:true,opacity:0.5}));
+const axisLine=new FatLine(2,{color:0x3a4763, width:1.2, opacity:0.6,
+  points:[new THREE.Vector3(-6,0,0),new THREE.Vector3(6,0,0)]});
 grp.shake.add(mShake1,mShake2,shakeHandle,axisLine);
 
 // Spring: two equal masses + coil
 const mSpr1=new THREE.Mesh(new THREE.SphereGeometry(0.55,32,24),
   new THREE.MeshStandardMaterial({color:0xdfe8ff, emissive:0x9db8ff, emissiveIntensity:0.5, roughness:0.4}));
 const mSpr2=mSpr1.clone();
-const coilGeom=new THREE.BufferGeometry();
-const COIL_N=140; coilGeom.setAttribute('position',new THREE.BufferAttribute(new Float32Array(COIL_N*3),3));
-const coil=new THREE.Line(coilGeom,new THREE.LineBasicMaterial({color:0x6f7f9e,transparent:true,opacity:0.85}));
+const COIL_N=140, coilArr=new Float32Array(COIL_N*3);
+const coil=new FatLine(COIL_N,{color:0x7f8fae, width:1.6, opacity:0.9});
 grp.spring.add(mSpr1,mSpr2,coil);
 
 // Orbit: two equal masses + faint orbit circle
 const mOrb1=mSpr1.clone(), mOrb2=mSpr1.clone();
-const orbCircGeom=new THREE.BufferGeometry();
-orbCircGeom.setAttribute('position',new THREE.BufferAttribute(new Float32Array(97*3),3));
-const orbCirc=new THREE.LineLoop(orbCircGeom,new THREE.LineBasicMaterial({color:0x3a4763,transparent:true,opacity:0.55}));
+const ORB_N=128, orbArr=new Float32Array(ORB_N*3);
+const orbCirc=new FatLine(ORB_N,{color:0x4a5878, width:1.2, opacity:0.6, loop:true});
 grp.orbit.add(mOrb1,mOrb2,orbCirc);
 
 // Mountain: spinning neutron star (ellipsoid + exaggerated mountain cone)
@@ -661,49 +645,109 @@ grp.mountain.add(nsSpin, glowSprite('rgba(140,170,255,.45)',6));
 
 /* ---------- outgoing wave field: polar grid, y-displaced by the
    vertical-basis h₊ at the retarded time.  For n̂=(cosφ,0,sinφ), e1=ŷ:
-   h₊ = Q̈_yy + ½(nx²Q̈_xx + nz²Q̈_zz + 2 nx nz Q̈_xz).                */
-const NR=34, NS=72;
+   h₊ = Q̈_yy + ½(nx²Q̈_xx + nz²Q̈_zz + 2 nx nz Q̈_xz),   h× = e1·Q̈·e2 ≡ 0 in this plane
+   (every source here has Q̈_xy = Q̈_yz = 0), so h₊ IS the whole strain on the sheet.
+
+   Evaluated on the GPU.  Each frame the shared history buffer is resampled at NT
+   radii, r_k → Q̈(t − r_k/c) (only xx, yy, zz, xz enter), into a 1-D float texture;
+   the vertex shader reads it at its own r and applies the exact angular pattern
+   per vertex.  The sheet is meshed finely in r (≈20 vertices per wavelength even
+   at the highest slider rate), so crests keep their true sinusoidal shape — the
+   old CPU grid had only ~3 samples per wavelength at f_GW = 2 Hz.  The visible
+   grid lines (NR rings × NS spokes, as before) are drawn analytically in the
+   fragment shader, anti-aliased and faded to their mean coverage where they
+   would alias into moiré. */
+const NR=34, NS=72;             // drawn grid lines (unchanged look)
+const NT=512;                   // radial samples of the retarded-time history
+const MESH_R=220, MESH_S=288;   // render mesh (r, φ) resolution
+const FIELD_AMP=1.15;           // scene-units of ripple at reference amplitude
+function fieldEnv(r){ return 1/(1+(r-R_IN)/9); }  // softened falloff (honesty note in Details)
+const fieldTexData=new Float32Array(NT*4);
+const fieldTex=new THREE.DataTexture(fieldTexData,NT,1,THREE.RGBAFormat,THREE.FloatType);
+fieldTex.minFilter=fieldTex.magFilter=THREE.NearestFilter; fieldTex.needsUpdate=true;
 const fieldGeom=new THREE.BufferGeometry();
 {
-  const pos=new Float32Array(NR*NS*3);
-  let k=0;
-  for(let i=0;i<NR;i++){
-    const r=R_IN+(R_OUT-R_IN)*i/(NR-1);
-    for(let j=0;j<NS;j++){
-      const ph=2*Math.PI*j/NS;
-      pos[k++]=r*Math.cos(ph); pos[k++]=0; pos[k++]=r*Math.sin(ph);
-    }
+  const pos=new Float32Array(MESH_R*MESH_S*3); let k=0;
+  for(let i=0;i<MESH_R;i++){
+    const r=R_IN+(R_OUT-R_IN)*i/(MESH_R-1);
+    for(let j=0;j<MESH_S;j++){ const ph=2*Math.PI*j/MESH_S;
+      pos[k++]=r*Math.cos(ph); pos[k++]=0; pos[k++]=r*Math.sin(ph); }
+  }
+  const idx=new Uint32Array((MESH_R-1)*MESH_S*6); k=0;
+  for(let i=0;i<MESH_R-1;i++) for(let j=0;j<MESH_S;j++){
+    const a=i*MESH_S+j, b=i*MESH_S+(j+1)%MESH_S, c=a+MESH_S, d=b+MESH_S;
+    idx[k++]=a; idx[k++]=c; idx[k++]=b; idx[k++]=b; idx[k++]=c; idx[k++]=d;
   }
   fieldGeom.setAttribute('position',new THREE.BufferAttribute(pos,3));
-  const idx=[];
-  for(let i=0;i<NR;i++) for(let j=0;j<NS;j++){
-    const a=i*NS+j, b=i*NS+(j+1)%NS;
-    idx.push(a,b);                          // ring segments
-    if(i<NR-1) idx.push(a,(i+1)*NS+j);      // spokes
-  }
-  fieldGeom.setIndex(idx);
+  fieldGeom.setIndex(new THREE.BufferAttribute(idx,1));
 }
-const fieldMat=new THREE.LineBasicMaterial({color:0xff7d9c,transparent:true,opacity:0.34,
-  blending:THREE.AdditiveBlending,depthWrite:false});
-const field=new THREE.LineSegments(fieldGeom,fieldMat);
-scene.add(field);
-const FIELD_AMP=1.15;   // scene-units of ripple at reference amplitude
-function fieldEnv(r){ return 1/(1+(r-R_IN)/9); }  // softened falloff (honesty note in Details)
-function updateField(){
-  const pos=fieldGeom.attributes.position.array;
-  const ref=REF[S.mode].q;
-  const cph=new Float64Array(NS), sph=new Float64Array(NS);
-  for(let j=0;j<NS;j++){ const ph=2*Math.PI*j/NS; cph[j]=Math.cos(ph); sph[j]=Math.sin(ph); }
-  for(let i=0;i<NR;i++){
-    const r=R_IN+(R_OUT-R_IN)*i/(NR-1);
-    const Q=lookupQ(tsim - r/C_SCENE);
-    const env=FIELD_AMP*fieldEnv(r)/ref;
-    for(let j=0;j<NS;j++){
-      const hp=Q[1] + 0.5*(cph[j]*cph[j]*Q[0] + sph[j]*sph[j]*Q[2] + 2*cph[j]*sph[j]*Q[4]);
-      pos[3*(i*NS+j)+1]=env*hp;
+const fieldMat=new THREE.ShaderMaterial({
+  uniforms:{ uQ:{value:fieldTex}, uN:{value:NT}, uRin:{value:R_IN}, uRout:{value:R_OUT},
+    uAmp:{value:FIELD_AMP}, uNR:{value:NR}, uNS:{value:NS},
+    uColor:{value:new THREE.Color(0xff7d9c)}, uOpacity:{value:0.34} },
+  vertexShader:/* glsl */`
+    uniform sampler2D uQ; uniform int uN; uniform float uRin, uRout, uAmp;
+    varying vec2 vRP; varying float vH;
+    vec4 qAt(float r){                          // linear interpolation in r
+      float x=clamp((r-uRin)/(uRout-uRin),0.0,1.0)*float(uN-1);
+      int i=min(int(floor(x)),uN-2); float f=x-float(i);
+      return mix(texelFetch(uQ,ivec2(i,0),0), texelFetch(uQ,ivec2(i+1,0),0), f);
     }
+    void main(){
+      vec3 p=position; float r=length(p.xz); vec2 n=p.xz/r;
+      vec4 Q=qAt(r);                            // (Q̈xx, Q̈yy, Q̈zz, Q̈xz)(t − r/c) / Q̈ref
+      float hp=Q.y + 0.5*(n.x*n.x*Q.x + n.y*n.y*Q.z + 2.0*n.x*n.y*Q.w);
+      p.y=uAmp*hp/(1.0+(r-uRin)/9.0);           // = FIELD_AMP·fieldEnv(r)·h₊
+      vH=hp; vRP=vec2(r, atan(p.z,p.x));
+      gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);
+    }`,
+  fragmentShader:/* glsl */`
+    uniform vec3 uColor; uniform float uOpacity, uNR, uNS, uRin, uRout;
+    varying vec2 vRP; varying float vH;
+    // coverage of a wPx-wide line (device px) at integer x; fw = |∇x| in cells per pixel.
+    // Fades to the mean coverage as cells shrink below a few pixels (no moiré).
+    float gradLen(float x){ return length(vec2(dFdx(x),dFdy(x))); }
+    float gridLine(float x, float fw, float wPx){
+      float d=abs(fract(x-0.5)-0.5)/max(fw,1e-6);
+      float line=clamp(0.5*wPx+0.5-d,0.0,1.0);
+      // where cells shrink below ~3 px, fade toward a fraction of the mean coverage
+      // (a dim sheen) rather than letting the grid alias or pile up into a solid band
+      return mix(line, 0.35*clamp(wPx*fw,0.0,1.0), smoothstep(0.15,0.4,fw));
+    }
+    void main(){
+      float s=(vRP.x-uRin)/(uRout-uRin);
+      float xr=s*(uNR-1.0);
+      float ua=vRP.y/6.283185307*uNS, ub=fract(vRP.y/6.283185307+0.5)*uNS;   // seam-free fwidth
+      float fwr=gradLen(xr), fwu=min(gradLen(ua),gradLen(ub));
+      float line=max(gridLine(xr,fwr,1.2), gridLine(ua,fwu,1.1));
+      float edge=1.0-smoothstep(0.86,1.0,s);                 // soft outer rim (display only)
+      float crest=0.045*clamp(vH,0.0,1.5);                    // faint glow on h₊ > 0 crests
+      gl_FragColor=vec4(uColor*(line*uOpacity+crest)*edge,1.0);
+    }`,
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, side:THREE.DoubleSide,
+});
+const field=new THREE.Mesh(fieldGeom,fieldMat);
+field.frustumCulled=false;
+scene.add(field);
+// resample Q̈ at retarded time t − r_k/c for NT radii. r descending ⇒ t_ret ascending,
+// so one forward sweep through the (time-ordered) history covers all samples.
+function updateField(){
+  const inv=1/REF[S.mode].q, n=hist.length, a=fieldTexData;
+  let i=0;
+  for(let k=NT-1;k>=0;k--){
+    const r=R_IN+(R_OUT-R_IN)*k/(NT-1), tr=tsim-r/C_SCENE;
+    let xx=0,yy=0,zz=0,xz=0;
+    if(n && tr>hist[0].t){                      // before the first sample: not yet emitted
+      if(tr>=hist[n-1].t){ const Q=hist[n-1].Q; xx=Q[0]; yy=Q[1]; zz=Q[2]; xz=Q[4]; }
+      else {
+        while(i<n-2 && hist[i+1].t<=tr) i++;
+        const A=hist[i].Q, B=hist[i+1].Q, f=(tr-hist[i].t)/((hist[i+1].t-hist[i].t)||1e-9);
+        xx=A[0]+f*(B[0]-A[0]); yy=A[1]+f*(B[1]-A[1]); zz=A[2]+f*(B[2]-A[2]); xz=A[4]+f*(B[4]-A[4]);
+      }
+    }
+    a[4*k]=xx*inv; a[4*k+1]=yy*inv; a[4*k+2]=zz*inv; a[4*k+3]=xz*inv;
   }
-  fieldGeom.attributes.position.needsUpdate=true;
+  fieldTex.needsUpdate=true;
 }
 
 /* ---------- observer + test-mass ring ---------- */
@@ -723,10 +767,13 @@ for(let i=0;i<RING_N;i++){
     new THREE.MeshBasicMaterial({color:0xfff0d6}));
   ringGroup.add(m); ringMasses.push(m);
 }
-const ringBaseGeom=new THREE.BufferGeometry();
-ringBaseGeom.setAttribute('position',new THREE.BufferAttribute(new Float32Array(64*3),3));
-const ringBase=new THREE.LineLoop(ringBaseGeom,new THREE.LineBasicMaterial({color:0xfff0d6,transparent:true,opacity:0.22}));
-ringGroup.add(ringBase);
+// reference (undeformed) circle, and a deformed loop drawn through the SAME displacement
+// field as the masses (exact to linear order in h, same visual clamp)
+const LOOP_N=96, baseArr=new Float32Array(LOOP_N*3), defArr=new Float32Array(LOOP_N*3);
+const ringBase=new FatLine(LOOP_N,{color:0xfff0d6, width:1.1, opacity:0.25, loop:true});
+const ringDef=new FatLine(LOOP_N,{color:0xfff0d6, width:1.8, opacity:0.75, loop:true});
+ringGroup.add(ringBase, ringDef);
+const _E1=new THREE.Vector3(), _E2=new THREE.Vector3(), _rv=new THREE.Vector3();
 function updateRing(){
   const n=obsDir();
   obsMarker.position.set(n[0]*R_OBS,n[1]*R_OBS,n[2]*R_OBS);
@@ -735,28 +782,42 @@ function updateRing(){
   const Q=lookupQ(tsim - R_OBS/C_SCENE);
   const {hp,hx}=hPol(Q,n,e1,e2);
   const gain=0.42*S.exag/REF[S.mode].q;
-  const E1=new THREE.Vector3(...e1), E2=new THREE.Vector3(...e2);
-  for(let i=0;i<RING_N;i++){
-    const a=2*Math.PI*i/RING_N, X=RING_R*Math.cos(a), Y=RING_R*Math.sin(a);
+  const E1=_E1.set(e1[0],e1[1],e1[2]), E2=_E2.set(e2[0],e2[1],e2[2]);
+  const cl=0.8*RING_R;
+  const disp=(a,out,base)=>{    // δX = ½(h₊X + h×Y), δY = ½(h×X − h₊Y), clamped for display
+    const X=RING_R*Math.cos(a), Y=RING_R*Math.sin(a);
     let dX=0.5*(hp*X+hx*Y)*gain, dY=0.5*(hx*X-hp*Y)*gain;
-    const cl=0.8*RING_R; dX=Math.max(-cl,Math.min(cl,dX)); dY=Math.max(-cl,Math.min(cl,dY));
-    ringMasses[i].position.set(0,0,0)
-      .addScaledVector(E1,X+dX).addScaledVector(E2,Y+dY);
+    dX=Math.max(-cl,Math.min(cl,dX)); dY=Math.max(-cl,Math.min(cl,dY));
+    if(base) out.set(0,0,0).addScaledVector(E1,X).addScaledVector(E2,Y);
+    else out.set(0,0,0).addScaledVector(E1,X+dX).addScaledVector(E2,Y+dY);
+    return out;
+  };
+  for(let i=0;i<RING_N;i++) disp(2*Math.PI*i/RING_N, ringMasses[i].position, false);
+  for(let i=0;i<LOOP_N;i++){
+    const a=2*Math.PI*i/LOOP_N;
+    disp(a,_rv,true);  baseArr[3*i]=_rv.x; baseArr[3*i+1]=_rv.y; baseArr[3*i+2]=_rv.z;
+    disp(a,_rv,false); defArr[3*i]=_rv.x;  defArr[3*i+1]=_rv.y;  defArr[3*i+2]=_rv.z;
   }
-  const bp=ringBaseGeom.attributes.position.array;
-  for(let i=0;i<64;i++){
-    const a=2*Math.PI*i/64, X=RING_R*Math.cos(a), Y=RING_R*Math.sin(a);
-    const v=new THREE.Vector3().addScaledVector(E1,X).addScaledVector(E2,Y);
-    bp[3*i]=v.x; bp[3*i+1]=v.y; bp[3*i+2]=v.z;
-  }
-  ringBaseGeom.attributes.position.needsUpdate=true;
+  ringBase.setPoints(baseArr); ringDef.setPoints(defArr);
 }
 
 /* ---------- radiation-pattern lobe ---------- */
-const lobeGeom=new THREE.SphereGeometry(1,48,32);
+const lobeGeom=new THREE.SphereGeometry(1,144,96);   // fine: reshaped only on mode change
 const lobeDirs=lobeGeom.attributes.position.array.slice(); // unit dirs
-const lobeMat=new THREE.MeshBasicMaterial({color:0xb0486a,transparent:true,opacity:0.13,
-  side:THREE.DoubleSide,depthWrite:false,blending:THREE.AdditiveBlending});
+// translucent shell: additive, brighter at grazing view angles (rim), so the 3-D shape
+// of dP/dΩ reads without hiding the source inside it
+const lobeMat=new THREE.ShaderMaterial({
+  uniforms:{ uColor:{value:new THREE.Color(0xb0486a)}, uOpacity:{value:0.13} },
+  vertexShader:/* glsl */`
+    varying vec3 vN, vV;
+    void main(){ vec4 mv=modelViewMatrix*vec4(position,1.0);
+      vN=normalMatrix*normal; vV=-mv.xyz; gl_Position=projectionMatrix*mv; }`,
+  fragmentShader:/* glsl */`
+    uniform vec3 uColor; uniform float uOpacity; varying vec3 vN, vV;
+    void main(){ float c=abs(dot(normalize(vN),normalize(vV)));
+      float rim=1.0-c; gl_FragColor=vec4(uColor*uOpacity*(0.45+2.2*rim*rim),1.0); }`,
+  side:THREE.DoubleSide, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+});
 const lobe=new THREE.Mesh(lobeGeom,lobeMat);
 scene.add(lobe);
 // patterns about the local +y axis; the mesh is rotated per mode
@@ -773,6 +834,7 @@ function reshapeLobe(){
     pos[i]=RL*f*dx; pos[i+1]=RL*f*dy; pos[i+2]=RL*f*dz;
   }
   lobeGeom.attributes.position.needsUpdate=true;
+  lobeGeom.computeVertexNormals();
   // linear modes oscillate along x → pattern axis x; rotating modes → axis y
   lobe.rotation.set(0,0,(S.mode==='spring'||S.mode==='shake')?-Math.PI/2:0);
 }
@@ -1112,10 +1174,19 @@ function currentMoments(dt){
   // live shake: critically damped spring toward pointer (drag) or sinusoid (auto)
   const w0=Math.max(6,3*2*Math.PI*S.kRate);
   const auto=!shake.dragging && (tsim-shake.lastDrag>1.5);
-  const target=shake.dragging ? shake.dragTarget
-              : auto ? S.kAmp*Math.sin(2*Math.PI*S.kRate*tsim) : 0;
+  // auto-drive target evaluated at each sub-step's own time (tsim is already advanced by dt)
+  const targetAt=tt=>shake.dragging ? shake.dragTarget
+              : auto ? S.kAmp*Math.sin(2*Math.PI*S.kRate*tt) : 0;
+  const target=targetAt(tsim);
+  // fixed sub-steps (≤ 1/240 s, semi-implicit Euler) so the stiff driver — and hence
+  // Q̈ = 2Σm(v² + x a) — does not inherit frame-time jitter; a is evaluated at the
+  // returned state so x, v, a are simultaneous
+  const nSub=Math.max(1,Math.ceil(dt*240)), h=dt/nSub;
+  for(let k=0;k<nSub;k++){
+    const ak=w0*w0*(targetAt(tsim-dt+(k+1)*h)-shake.s)-2*w0*shake.v;
+    shake.v+=ak*h; shake.s+=shake.v*h;
+  }
   const a=w0*w0*(target-shake.s)-2*w0*shake.v;
-  shake.v+=a*dt; shake.s+=shake.v*dt;
   const g=shakeGeom();
   return shakeMoments(g.x10+shake.s, shake.v, a);
 }
@@ -1134,21 +1205,21 @@ function animate(){
       shakeHandle.position.x=mo.x1;
     } else if(S.mode==='spring'){
       mSpr1.position.x=mo.x1; mSpr2.position.x=mo.x2;
-      const cp=coilGeom.attributes.position.array;
+      const cp=coilArr;
       const a0=mo.x2+0.55, a1=mo.x1-0.55;
       for(let i=0;i<COIL_N;i++){
         const u=i/(COIL_N-1), ang=u*Math.PI*2*9;
         cp[3*i]=a0+(a1-a0)*u; cp[3*i+1]=0.22*Math.cos(ang); cp[3*i+2]=0.22*Math.sin(ang);
       }
-      coilGeom.attributes.position.needsUpdate=true;
+      coil.setPoints(cp);
     } else if(S.mode==='orbit'){
       const d=S.oSep/2;
       mOrb1.position.set(d*Math.cos(mo.th),0,d*Math.sin(mo.th));
       mOrb2.position.set(-d*Math.cos(mo.th),0,-d*Math.sin(mo.th));
-      const op=orbCircGeom.attributes.position.array;
-      for(let i=0;i<97;i++){ const a=2*Math.PI*i/97;
-        op[3*i]=d*Math.cos(a); op[3*i+1]=0; op[3*i+2]=d*Math.sin(a); }
-      orbCircGeom.attributes.position.needsUpdate=true;
+      if(orbCirc.userData.d!==d){ orbCirc.userData.d=d;     // rebuild only when the separation changes
+        for(let i=0;i<ORB_N;i++){ const a=2*Math.PI*i/ORB_N;
+          orbArr[3*i]=d*Math.cos(a); orbArr[3*i+1]=0; orbArr[3*i+2]=d*Math.sin(a); }
+        orbCirc.setPoints(orbArr); }
     } else if(S.mode==='mountain'){
       nsSpin.rotation.y=-mo.th;
       mountain.position.set(1.5*(1+S.mEps*1.4)+0.22,0,0);
@@ -1157,15 +1228,9 @@ function animate(){
   updateField();
   updateRing();
   drawMeters();
-  if(camTween){
-    camTween.e+=dt; const u=Math.min(1,camTween.e/camTween.dur);
-    const s=1-Math.pow(1-u,3);
-    camera.position.lerpVectors(camTween.p0,camTween.p1,s);
-    controls.target.lerpVectors(camTween.t0,camTween.t1,s);
-    if(u>=1) camTween=null;
-  }
+  flight.update(dt);
   controls.update();
-  composer.render();
+  pipeline.render();
 }
 
 /* ============================================================
@@ -1173,7 +1238,7 @@ function animate(){
    ============================================================ */
 function onResize(){
   const w=innerWidth,h=innerHeight;
-  renderer.setSize(w,h); composer.setSize(w,h);
+  pipeline.setSize(w,h);
   camera.aspect=w/h; camera.updateProjectionMatrix();
   sizePlot();
 }
